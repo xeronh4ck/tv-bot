@@ -3,6 +3,7 @@ import gzip
 import io
 import json
 import logging
+import certifi
 import os
 import re
 import threading
@@ -81,7 +82,11 @@ if not MONGO_URI:
       " reset on restart."
   )
 
-mongo_client = pymongo.MongoClient(MONGO_URI) if MONGO_URI else None
+mongo_client = (
+    pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    if MONGO_URI
+    else None
+)
 db = mongo_client["netflix_bot_db"] if mongo_client else None
 
 # Collections
