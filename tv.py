@@ -83,7 +83,12 @@ if not MONGO_URI:
   )
 
 mongo_client = (
-    pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    pymongo.MongoClient(
+        MONGO_URI,
+        tls=True,
+        tlsAllowInvalidCertificates=True,
+        serverSelectionTimeoutMS=5000,
+    )
     if MONGO_URI
     else None
 )
