@@ -1,0 +1,7 @@
+python-telegram-bot==21.1
+requests==2.32.3
+urllib3==1.26.20
+flask==3.0.0
+gunicorn==23.0.0
+rarfile==4.2
+pymongo
