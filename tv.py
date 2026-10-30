@@ -52,7 +52,7 @@ threading.Thread(target=run_web_server, daemon=True).start()
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+logger = logger = logging.getLogger(__name__)
 
 # ========== RAR SUPPORT ==========
 try:
@@ -63,8 +63,14 @@ except ImportError:
     RAR_SUPPORT = False
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8643705076:AAFugF_6hBAlhqgZIW6GRXnlC_ZznTQHIGA"  # Hardcoded token
+# Reads from Render Environment Variable 'BOT_TOKEN', or uses hardcoded fallback
+BOT_TOKEN = os.environ.get(
+    "BOT_TOKEN", "8643705076:AAFugF_6hBAlhqgZIW6GRXnlC_ZznTQHIGA"
+)
 ADMIN_IDS = [6420446828]  # Your Telegram user IDs
+
+# ========== BULK CANCELLATION EVENT ==========
+cancel_bulk_event = threading.Event()
 
 # ========== PROXY CONFIGURATION (FROM RENDER ENV) ==========
 PROXY_URL = os.environ.get("PROXY_URL")
@@ -794,6 +800,23 @@ async def bulkadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await safe_reply(update.message, "⛔ Admins only.")
+        return
+
+    if not cancel_bulk_event.is_set():
+        cancel_bulk_event.set()
+        await safe_reply(
+            update.message,
+            "🛑 **Stopping bulk check process...** Please wait a moment for the"
+            " current item to finish.",
+            parse_mode="Markdown",
+        )
+    else:
+        await safe_reply(update.message, "ℹ️ No bulk process is currently running.")
+
+
 async def delall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
@@ -855,7 +878,7 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========== FILE HANDLER WITH LIVE LOGS & AUTO-DETECTION ==========
+# ========== FILE HANDLER WITH STOP CONTROL & AUTO-DETECTION ==========
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
@@ -947,8 +970,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("❌ Please upload a .zip or .rar file.")
             return
 
+        # Clear any previous cancel event before starting
+        cancel_bulk_event.clear()
+
         if status_msg:
-            await status_msg.edit_text("📦 Unpacking and checking accounts...")
+            await status_msg.edit_text(
+                "📦 Unpacking and checking accounts...\n\n💡 Send /stop anytime to halt the process."
+            )
 
         file = await context.bot.get_file(document.file_id)
         raw_data = await file.download_as_bytearray()
@@ -956,9 +984,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         added = 0
         rejected = 0
         duplicates = 0
+        was_stopped = False
 
         def process_bulk_files():
-            nonlocal added, rejected, duplicates
+            nonlocal added, rejected, duplicates, was_stopped
             entries = []
 
             if file_name.endswith(".zip"):
@@ -982,6 +1011,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"📦 Unpacked {len(entries)} cookie files. Starting validation...")
 
             for i, (fname, nid) in enumerate(entries, 1):
+                if cancel_bulk_event.is_set():
+                    logger.info("🛑 Bulk checking stopped by admin command.")
+                    was_stopped = True
+                    break
+
                 logger.info(f"🔍 [{i}/{len(entries)}] Validating {fname}...")
                 is_alive, reason = check_if_cookie_alive(nid)
                 if is_alive:
@@ -998,9 +1032,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await asyncio.to_thread(process_bulk_files)
 
+        status_title = (
+            "🛑 **Bulk Check Stopped Manually!**"
+            if was_stopped
+            else "✅ **Bulk Upload Processed!**"
+        )
+
         if status_msg:
             await status_msg.edit_text(
-                "✅ **Bulk Upload Processed!**\n\n"
+                f"{status_title}\n\n"
                 f"🟢 **Valid Added:** `{added}`\n"
                 f"🔴 **Rejected (Dead/Hold/Free):** `{rejected}`\n"
                 f"⚠️ **Duplicates Skipped:** `{duplicates}`",
@@ -1021,6 +1061,7 @@ async def set_commands(app: Application):
     admin_commands = default_commands + [
         BotCommand("addsingle", "Add a single cookie"),
         BotCommand("bulkadd", "Add ZIP/RAR of cookies"),
+        BotCommand("stop", "Stop active bulk checking"),
         BotCommand("listcookies", "Show all cookies"),
         BotCommand("delcookie", "Delete a cookie"),
         BotCommand("delall", "Delete all cookies"),
@@ -1046,6 +1087,7 @@ def main():
     app.add_handler(CommandHandler("channels", channels_command))
     app.add_handler(CommandHandler("addsingle", addsingle_command))
     app.add_handler(CommandHandler("bulkadd", bulkadd_command))
+    app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("delall", delall_command))
     app.add_handler(CommandHandler("delall_confirm", delall_confirm))
     app.add_handler(CommandHandler("listcookies", list_cookies))
