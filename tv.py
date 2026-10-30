@@ -65,6 +65,10 @@ except ImportError:
 BOT_TOKEN = "8643705076:AAExVtZYb-PQMAbW3T7uk2LWjKkBEUPWXQg"  # Hardcoded token
 ADMIN_IDS = [6420446828]  # Your Telegram user IDs
 
+# ========== PROXY CONFIGURATION (FROM RENDER ENV) ==========
+PROXY_URL = os.environ.get("PROXY_URL")
+PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
 # Force-join channels (optional – leave empty to disable)
 REQUIRED_CHANNELS = [{
     "username": "@XeronLab",
@@ -105,7 +109,7 @@ _local_cookies_store = {}
 _local_user_stats = {}
 _local_channels = []
 
-# ========== HEADERS FOR /tv2 API ==========
+# ========== HEADERS FOR /tv2 API & VALIDATION ==========
 BASE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like"
@@ -143,6 +147,71 @@ async def safe_reply(message, text, **kwargs):
     except Exception as e:
         logger.warning(f"Safe reply failed: {e}")
     return None
+
+
+# ========== COOKIE VALIDATION HELPER ==========
+def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
+    """Checks if a NetflixId cookie is valid, active, paid, and not on hold.
+
+    Returns (True, "OK") or (False, "Reason").
+    """
+    session = requests.Session()
+    if PROXIES:
+        session.proxies.update(PROXIES)
+
+    session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
+    headers = {
+        "User-Agent": BASE_HEADERS["User-Agent"],
+        "Accept": BASE_HEADERS["Accept"],
+        "Accept-Encoding": BASE_HEADERS["Accept-Encoding"],
+        "Accept-Language": BASE_HEADERS["Accept-Language"],
+        "Referer": "https://www.netflix.com/",
+    }
+    try:
+        r = session.get(
+            "https://www.netflix.com/account/membership",
+            headers=headers,
+            timeout=10,
+            verify=False,
+        )
+
+        # 1. Check if session/cookie is invalid or dead
+        if r.status_code != 200 or "currentCountry" not in r.text:
+            return False, "Dead/Expired Cookie"
+
+        lower_text = r.text.lower()
+
+        # 2. Check for Payment On Hold / Billing Issues
+        if (
+            "payment on hold" in lower_text
+            or "update your payment information" in lower_text
+            or "membership holds" in lower_text
+            or "hold" in lower_text
+        ):
+            return False, "Payment On Hold"
+
+        # 3. Check for Free / Trial / Non-Active Plans
+        if "free plan" in lower_text or "no active plan" in lower_text:
+            return False, "Free/Inactive Plan"
+
+        plan_match = re.search(
+            r'"MemberPlan".*?"localizedPlanName".*?"value":"([^"]+)"',
+            r.text,
+            re.DOTALL,
+        )
+        if not plan_match:
+            plan_match = re.search(r'"localizedPlanName"\s*:\s*"([^"]+)"', r.text)
+
+        if plan_match:
+            plan_name = plan_match.group(1).lower()
+            if "free" in plan_name or "invalid" in plan_name:
+                return False, f"Unsupported Plan ({plan_name.title()})"
+
+        return True, "OK"
+
+    except Exception as e:
+        logger.warning(f"Cookie check error for {netflix_id[:15]}: {e}")
+        return False, "Connection Error"
 
 
 # ========== MONGODB / PERSISTENCE FUNCTIONS ==========
@@ -370,6 +439,9 @@ def submit_tv_code(
     netflix_id: str, tv_code: str
 ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[int]]:
     session = requests.Session()
+    if PROXIES:
+        session.proxies.update(PROXIES)
+
     session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     headers = BASE_HEADERS.copy()
     headers["Referer"] = "https://www.netflix.com/tv2"
@@ -448,6 +520,9 @@ def submit_tv_code(
 # ========== PLAN & COUNTRY ==========
 def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]:
     sess = requests.Session()
+    if PROXIES:
+        sess.proxies.update(PROXIES)
+
     sess.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     headers = {
         "User-Agent": BASE_HEADERS["User-Agent"],
@@ -504,9 +579,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Force join check failed: {e}")
     await safe_reply(
         update.message,
-        "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!\n\n"
-        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝗜𝗡⚡\n\n"
-        "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+        "WELCOME TO NETFLIX TV LOGIN BOT!\n\n"
+        "⚡ INSTANTLY LOGIN ⚡\n⚡ MIX PLAN LOGIN ⚡\n\n"
+        "MADE BY XERON @xixwv",
     )
 
 
@@ -570,9 +645,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await safe_reply(
             update.message,
-            "⚡𝑺𝒖𝒑𝒑𝒐𝒓𝒕𝒆𝒅 𝑭𝒐𝒓𝒎𝒂𝒕⚡\n\n"
-            "/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n\n"
-            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+            "⚡ Supported Format ⚡\n\n"
+            "/login 12345678\n/login 1234-5678\n\n"
+            "MADE BY XERON @xixwv",
         )
         return
     raw_code = args[0]
@@ -580,9 +655,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tv_code.isdigit() or len(tv_code) < 5:
         await safe_reply(
             update.message,
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
-            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
-            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+            "LOGIN FAILED THE CODE IS INVALID❌\n\n"
+            "SUPPORTED FORMAT\n/login 1234-5678\n/login 12345678\n\n"
+            "MADE BY XERON @xixwv",
         )
         return
 
@@ -590,16 +665,16 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(
             update.message,
-            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧𝗟𝗬!\n\n"
-            "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 𝗟𝗮𝘁𝗲𝗿!\n\n"
-            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+            "NO COOKIES AVAILABLE CURRENTLY!\n\n"
+            "Please TRY Later!\n\n"
+            "MADE BY XERON @xixwv",
         )
         return
 
-    # Send initial status message
-    status_msg = await safe_reply(update.message, "⌛️𝐀𝐂𝐓𝐈𝐕𝐀𝐓𝐈𝐍𝐆 𝐍𝐄𝐓𝐅𝐋𝐈𝐗... ")
+    # Intermediate status feedback
+    status_msg = await safe_reply(update.message, "⌛️ACTIVATING NETFLIX... ")
 
-    # Shuffle all cookies to ensure randomized rotation
+    # Shuffle valid cookies for load balancing
     valid_cookies = [c for c in all_cookies if c.get("usage_count", 0) < MAX_USAGE_PER_COOKIE]
     random.shuffle(valid_cookies)
     cookies_to_try = valid_cookies[:MAX_COOKIES_TO_TRY]
@@ -622,14 +697,14 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not country:
                 country = "Unknown"
                 plan = "Unknown"
-            
+
             success_text = (
-                "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡\n\n"
-                f"ℂ𝕆𝕌ℕ𝕋ℝ𝕐:❮{country.upper()}❯     ┃  "
-                f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯\n\n"
-                "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
+                "⚡YOUR TV HAS BEEN LOGGED IN SUCCESSFULLY!⚡\n\n"
+                f"COUNTRY:❮{country.upper()}❯     ┃  "
+                f" PLAN:❮{plan.upper()}❯\n\n"
+                "MADE BY XERON @xixwv"
             )
-            
+
             if status_msg:
                 try:
                     await status_msg.edit_text(success_text)
@@ -647,9 +722,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         fail_text = (
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
-            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
-            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
+            "LOGIN FAILED THE CODE IS INVALID❌\n\n"
+            "SUPPORTED FORMAT\n/login 1234-5678\n/login 12345678\n\n"
+            "MADE BY XERON @xixwv"
         )
         if status_msg:
             try:
@@ -677,8 +752,7 @@ async def bulkadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await safe_reply(
         update.message,
-        "/BulkAdd 𝔸𝔻𝔻 𝕄𝕌𝕃𝕋ℙ𝕃𝔼 ℂ𝕆𝕆𝕄𝕀𝔼𝕊 𝔽𝕀𝕃𝔼 𝕊𝕌ℙℙ𝕆ℝ𝕋𝔼𝔻 𝔽𝕆ℝ𝕄𝔸𝕋"
-        " .𝕫𝕚𝕡 𝕒𝕟𝕕 .𝕣𝕒𝕣",
+        "/bulkadd ADD MULTIPLE COOKIES FILE SUPPORTED FORMAT .zip and .rar",
     )
     context.user_data["awaiting_bulk_file"] = True
 
@@ -744,7 +818,7 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========== FILE HANDLER ==========
+# ========== FILE HANDLER WITH LIVE & PLAN VALIDATION ==========
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
@@ -762,53 +836,76 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await safe_reply(
-        update.message, "📥 Downloading and processing file, please wait..."
+    status_msg = await safe_reply(
+        update.message, "📥 Downloading and validating cookie..."
     )
 
+    # Single File Upload
     if context.user_data.get("awaiting_single_file"):
         context.user_data.pop("awaiting_single_file")
         if not (file_name.endswith(".txt") or file_name.endswith(".json")):
-            await safe_reply(
-                update.message, "❌ Only .txt or .json files are accepted."
-            )
+            if status_msg:
+                await status_msg.edit_text("❌ Only .txt or .json files are accepted.")
             return
+
         file = await context.bot.get_file(document.file_id)
         file_bytes = await file.download_as_bytearray()
         content = file_bytes.decode("utf-8", errors="ignore")
         netflix_id = extract_netflix_id_from_text(content)
+
         if not netflix_id:
-            await safe_reply(
-                update.message, "❌ No valid NetflixId found in the file."
-            )
+            if status_msg:
+                await status_msg.edit_text("❌ No valid NetflixId found in the file.")
             return
+
+        # Perform live check
+        if status_msg:
+            await status_msg.edit_text("🔍 Checking cookie validity and account status...")
+        is_alive, reason = check_if_cookie_alive(netflix_id)
+
+        if not is_alive:
+            if status_msg:
+                await status_msg.edit_text(
+                    f"❌ **Cookie Rejected:** `{reason}`", parse_mode="Markdown"
+                )
+            return
+
         success, msg = add_cookie_with_metadata(
             user.id, document.file_name, netflix_id
         )
         if success:
-            await safe_reply(
-                update.message,
-                f"✅ Cookie added: `{document.file_name}` → NetflixId:"
-                f" `{netflix_id[:20]}...`",
-                parse_mode="Markdown",
-            )
+            if status_msg:
+                await status_msg.edit_text(
+                    f"✅ **Valid Cookie Added:** `{document.file_name}`\nNetflixId:"
+                    f" `{netflix_id[:20]}...`",
+                    parse_mode="Markdown",
+                )
         else:
-            await safe_reply(update.message, "⚠️ Cookie already exists or error.")
+            if status_msg:
+                await status_msg.edit_text("⚠️ Cookie already exists or error.")
         return
 
+    # Bulk File Upload (.zip / .rar)
     if context.user_data.get("awaiting_bulk_file"):
         context.user_data.pop("awaiting_bulk_file")
         if not (
             file_name.endswith(".zip") or (RAR_SUPPORT and file_name.endswith(".rar"))
         ):
-            await safe_reply(update.message, "❌ Please upload a .zip or .rar file.")
+            if status_msg:
+                await status_msg.edit_text("❌ Please upload a .zip or .rar file.")
             return
-        await safe_reply(
-            update.message, "📦 Processing archive, this may take a moment..."
-        )
+
+        if status_msg:
+            await status_msg.edit_text(
+                "📦 Unpacking and checking accounts (filtering dead/hold/free)..."
+            )
         file = await context.bot.get_file(document.file_id)
         raw_data = await file.download_as_bytearray()
+
         added = 0
+        rejected = 0
+        duplicates = 0
+
         if file_name.endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
                 for fname in zf.namelist():
@@ -816,14 +913,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         content = zf.read(fname).decode("utf-8", errors="ignore")
                         netflix_id = extract_netflix_id_from_text(content)
                         if netflix_id:
-                            success, _ = add_cookie_with_metadata(
-                                user.id, fname, netflix_id
-                            )
-                            if success:
-                                added += 1
-            await safe_reply(
-                update.message, f"✅ Added {added} cookie(s) from ZIP."
-            )
+                            is_alive, _ = check_if_cookie_alive(netflix_id)
+                            if is_alive:
+                                success, _ = add_cookie_with_metadata(
+                                    user.id, fname, netflix_id
+                                )
+                                if success:
+                                    added += 1
+                                else:
+                                    duplicates += 1
+                            else:
+                                rejected += 1
+
         elif RAR_SUPPORT and file_name.endswith(".rar"):
             with rarfile.RarFile(io.BytesIO(raw_data)) as rf:
                 for fname in rf.namelist():
@@ -831,13 +932,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         content = rf.read(fname).decode("utf-8", errors="ignore")
                         netflix_id = extract_netflix_id_from_text(content)
                         if netflix_id:
-                            success, _ = add_cookie_with_metadata(
-                                user.id, fname, netflix_id
-                            )
-                            if success:
-                                added += 1
-            await safe_reply(
-                update.message, f"✅ Added {added} cookie(s) from RAR."
+                            is_alive, _ = check_if_cookie_alive(netflix_id)
+                            if is_alive:
+                                success, _ = add_cookie_with_metadata(
+                                    user.id, fname, netflix_id
+                                )
+                                if success:
+                                    added += 1
+                                else:
+                                    duplicates += 1
+                            else:
+                                rejected += 1
+
+        if status_msg:
+            await status_msg.edit_text(
+                "✅ **Bulk Upload Processed!**\n\n"
+                f"🟢 **Valid Added:** `{added}`\n"
+                f"🔴 **Rejected (Dead/Hold/Free):** `{rejected}`\n"
+                f"⚠️ **Duplicates Skipped:** `{duplicates}`",
+                parse_mode="Markdown",
             )
         return
 
