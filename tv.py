@@ -213,11 +213,11 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
 
         lower_text = r.text.lower()
 
+        # Specific hold banners (prevents false positives from general text)
         if (
-            "payment on hold" in lower_text
-            or "update your payment information" in lower_text
-            or "membership holds" in lower_text
-            or "hold" in lower_text
+            "your membership is on hold" in lower_text
+            or "update your payment info to continue" in lower_text
+            or "payment is on hold" in lower_text
         ):
             return False, "Payment On Hold"
 
@@ -242,6 +242,7 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
     except Exception as e:
         logger.warning(f"Cookie check error for {netflix_id[:15]}: {e}")
         return False, "Connection Error"
+        
 
 
 # ========== MONGODB / PERSISTENCE FUNCTIONS ==========
