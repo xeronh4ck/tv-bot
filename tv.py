@@ -76,11 +76,33 @@ cancel_bulk_event = threading.Event()
 PROXY_URL = os.environ.get("PROXY_URL")
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
+
+# ========== PROXY IP VERIFICATION ==========
+def check_active_ip():
+  try:
+    session = requests.Session()
+    if PROXIES:
+      session.proxies.update(PROXIES)
+
+    resp = safe_request(
+        "GET", "https://api.ipify.org?format=json", session=session, timeout=10
+    )
+    ip = resp.json().get("ip")
+
+    if PROXIES:
+      logger.info(f"🌐 SCRIPT IP CHECK: Connected via PROXY -> {ip}")
+    else:
+      logger.info(f"🖥️ SCRIPT IP CHECK: Connected via RENDER DIRECT -> {ip}")
+  except Exception as e:
+    logger.warning(f"⚠️ Could not check active IP on startup: {e}")
+
+
 # Force-join channels (optional – leave empty to disable)
 REQUIRED_CHANNELS = [{
     "username": "@XeronLab",
     "invite_link": "https://t.me/XeronLab",
 }]
+
 
 REQUEST_TIMEOUT = 15
 MAX_USAGE_PER_COOKIE = 2
@@ -183,7 +205,7 @@ async def safe_reply(message, text, **kwargs):
     return None
 
 
-# ========== COOKIE VALIDATION HELPER ==========
+# ========== IMPROVED COOKIE VALIDATION HELPER ==========
 def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
     """Checks if a NetflixId cookie is valid, active, paid, and not on hold."""
     session = requests.Session()
@@ -213,17 +235,45 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
 
         lower_text = r.text.lower()
 
-        # Specific hold banners (prevents false positives from general text)
-        if (
-            "your membership is on hold" in lower_text
-            or "update your payment info to continue" in lower_text
-            or "payment is on hold" in lower_text
-        ):
-            return False, "Payment On Hold"
+        # 1. Comprehensive Hold & Payment Error Banners
+        hold_indicators = [
+            "membership is on hold",
+            "membership on hold",
+            "payment is on hold",
+            "payment on hold",
+            "update your payment",
+            "update payment info",
+            "account is on hold",
+            "account on hold",
+            "finish sign-up",
+            "finish signup",
+            "restart your membership",
+            "restart membership",
+            "reactivate",
+        ]
 
-        if "free plan" in lower_text or "no active plan" in lower_text:
+        for indicator in hold_indicators:
+            if indicator in lower_text:
+                return False, f"Payment On Hold ({indicator.title()})"
+
+        # 2. Check Netflix Internal JSON Data Flags for Hold States
+        if (
+            '"accountstatus":"hold"' in lower_text
+            or '"ishold":true' in lower_text
+            or '"membershipstatus":"hold"' in lower_text
+            or '"holdstatus":true' in lower_text
+        ):
+            return False, "Payment On Hold (JSON Flag)"
+
+        # 3. Check for Free / Inactive / Cancelled Plans
+        if (
+            "free plan" in lower_text
+            or "no active plan" in lower_text
+            or "cancelled" in lower_text
+        ):
             return False, "Free/Inactive Plan"
 
+        # 4. Verify Plan Name Exists
         plan_match = re.search(
             r'"MemberPlan".*?"localizedPlanName".*?"value":"([^"]+)"',
             r.text,
@@ -234,7 +284,7 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
 
         if plan_match:
             plan_name = plan_match.group(1).lower()
-            if "free" in plan_name or "invalid" in plan_name:
+            if "free" in plan_name or "invalid" in plan_name or "hold" in plan_name:
                 return False, f"Unsupported Plan ({plan_name.title()})"
 
         return True, "OK"
@@ -242,6 +292,8 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
     except Exception as e:
         logger.warning(f"Cookie check error for {netflix_id[:15]}: {e}")
         return False, "Connection Error"
+        
+
         
 
 
@@ -1079,9 +1131,14 @@ async def set_commands(app: Application):
 # ========== MAIN ==========
 def main():
     if not BOT_TOKEN:
-        print("❌ Please set your BOT_TOKEN in the script.")
+        print("x Please set your BOT_TOKEN in the script.")
         return
+
+    # Call IP verification here before bot launches
+    check_active_ip()
+
     app = Application.builder().token(BOT_TOKEN).build()
+ 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login_command))
     app.add_handler(CommandHandler("panel", panel_command))
