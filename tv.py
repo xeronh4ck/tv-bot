@@ -63,7 +63,7 @@ except ImportError:
     RAR_SUPPORT = False
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8643705076:AAExVtZYb-PQMAbW3T7uk2LWjKkBEUPWXQg"  # Hardcoded token
+BOT_TOKEN = "8643705076:AAFugF_6hBAlhqgZIW6GRXnlC_ZznTQHIGA"  # Hardcoded token
 ADMIN_IDS = [6420446828]  # Your Telegram user IDs
 
 # ========== PROXY CONFIGURATION (FROM RENDER ENV) ==========
@@ -774,9 +774,10 @@ async def addsingle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
         return
+    context.user_data["awaiting_bulk_file"] = False
     context.user_data["awaiting_single_file"] = True
     await safe_reply(
-        update.message, "📤 Please send the cookie file (.txt or .json)"
+        update.message, "📤 Please send the single cookie file (.txt or .json)"
     )
 
 
@@ -784,11 +785,13 @@ async def bulkadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
         return
+    context.user_data["awaiting_single_file"] = False
+    context.user_data["awaiting_bulk_file"] = True
     await safe_reply(
         update.message,
-        "/bulkadd ADD MULTIPLE COOKIES FILE SUPPORTED FORMAT .zip and .rar",
+        "📦 Send your `.zip` or `.rar` file containing cookie files.",
+        parse_mode="Markdown",
     )
-    context.user_data["awaiting_bulk_file"] = True
 
 
 async def delall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -852,15 +855,17 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========== FILE HANDLER WITH LIVE & PLAN VALIDATION (NON-BLOCKING) ==========
+# ========== FILE HANDLER WITH LIVE LOGS & AUTO-DETECTION ==========
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Only admins can add cookies.")
         return
+
     document = update.message.document
     if not document:
         return
+
     file_name = document.file_name.lower()
 
     if document.file_size > 5 * 1024 * 1024:
@@ -870,13 +875,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    status_msg = await safe_reply(
-        update.message, "📥 Downloading and validating cookie..."
-    )
+    is_bulk = context.user_data.get("awaiting_bulk_file", False)
+    is_single = context.user_data.get("awaiting_single_file", False)
 
-    # Single File Upload
-    if context.user_data.get("awaiting_single_file"):
-        context.user_data.pop("awaiting_single_file")
+    # Clean flags once received
+    context.user_data["awaiting_single_file"] = False
+    context.user_data["awaiting_bulk_file"] = False
+
+    # Auto-detection if command wasn't called right before
+    if not is_bulk and not is_single:
+        if file_name.endswith((".zip", ".rar")):
+            is_bulk = True
+        elif file_name.endswith((".txt", ".json")):
+            is_single = True
+        else:
+            await safe_reply(update.message, "⚠️ Send /addsingle or /bulkadd first.")
+            return
+
+    status_msg = await safe_reply(update.message, "📥 Downloading file...")
+
+    # --- SINGLE FILE UPLOAD ---
+    if is_single:
         if not (file_name.endswith(".txt") or file_name.endswith(".json")):
             if status_msg:
                 await status_msg.edit_text("❌ Only .txt or .json files are accepted.")
@@ -889,13 +908,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not netflix_id:
             if status_msg:
-                await status_msg.edit_text("❌ No valid NetflixId found in the file.")
+                await status_msg.edit_text("❌ No valid NetflixId found in file.")
             return
 
         if status_msg:
-            await status_msg.edit_text("🔍 Checking cookie validity and account status...")
+            await status_msg.edit_text("🔍 Checking cookie validity...")
 
-        # Run cookie validation in background thread
         is_alive, reason = await asyncio.to_thread(check_if_cookie_alive, netflix_id)
 
         if not is_alive:
@@ -917,12 +935,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         else:
             if status_msg:
-                await status_msg.edit_text("⚠️ Cookie already exists or error.")
+                await status_msg.edit_text("⚠️ Cookie already exists.")
         return
 
-    # Bulk File Upload (.zip / .rar)
-    if context.user_data.get("awaiting_bulk_file"):
-        context.user_data.pop("awaiting_bulk_file")
+    # --- BULK FILE UPLOAD (.ZIP / .RAR) ---
+    if is_bulk:
         if not (
             file_name.endswith(".zip") or (RAR_SUPPORT and file_name.endswith(".rar"))
         ):
@@ -962,18 +979,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             if nid:
                                 entries.append((fname, nid))
 
-            for fname, nid in entries:
-                is_alive, _ = check_if_cookie_alive(nid)
+            logger.info(f"📦 Unpacked {len(entries)} cookie files. Starting validation...")
+
+            for i, (fname, nid) in enumerate(entries, 1):
+                logger.info(f"🔍 [{i}/{len(entries)}] Validating {fname}...")
+                is_alive, reason = check_if_cookie_alive(nid)
                 if is_alive:
                     success, _ = add_cookie_with_metadata(user.id, fname, nid)
                     if success:
+                        logger.info(f"🟢 [{i}/{len(entries)}] ADDED: {fname}")
                         added += 1
                     else:
+                        logger.info(f"🟡 [{i}/{len(entries)}] DUPLICATE: {fname}")
                         duplicates += 1
                 else:
+                    logger.info(f"🔴 [{i}/{len(entries)}] REJECTED ({reason}): {fname}")
                     rejected += 1
 
-        # Run extraction and HTTP checks asynchronously in thread pool
         await asyncio.to_thread(process_bulk_files)
 
         if status_msg:
@@ -985,8 +1007,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         return
-
-    await safe_reply(update.message, "Use /addsingle or /bulkadd first.")
 
 
 # ========== SET COMMANDS ==========
