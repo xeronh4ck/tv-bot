@@ -1,14 +1,15 @@
 # @Atoniz715 Gay Maker
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import io
 import json
 import logging
-import certifi
 import os
 import random
 import re
 import threading
+import time
 import urllib.parse
 import warnings
 import zipfile
@@ -40,6 +41,11 @@ def home():
     return "Bot is running fine!", 200
 
 
+@app_flask.route("/health")
+def health():
+    return {"status": "healthy"}, 200
+
+
 def run_web_server():
     port = int(os.environ.get("PORT", 8000))
     app_flask.run(host="0.0.0.0", port=port)
@@ -52,68 +58,33 @@ threading.Thread(target=run_web_server, daemon=True).start()
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-logger = logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # ========== RAR SUPPORT ==========
 try:
     import rarfile
-
     RAR_SUPPORT = True
 except ImportError:
     RAR_SUPPORT = False
 
 # ========== CONFIGURATION ==========
-# Reads from Render Environment Variable 'BOT_TOKEN', or uses hardcoded fallback
-BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN", "8643705076:AAFugF_6hBAlhqgZIW6GRXnlC_ZznTQHIGA"
-)
+BOT_TOKEN = "8643705076:AAExVtZYb-PQMAbW3T7uk2LWjKkBEUPWXQg"  # Hardcoded token
 ADMIN_IDS = [6420446828]  # Your Telegram user IDs
 
-# ========== BULK CANCELLATION EVENT ==========
-cancel_bulk_event = threading.Event()
-
-# ========== PROXY CONFIGURATION (FROM RENDER ENV) ==========
-PROXY_URL = os.environ.get("PROXY_URL")
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-
-
-# ========== PROXY IP VERIFICATION ==========
-def check_active_ip():
-  try:
-    session = requests.Session()
-    if PROXIES:
-      session.proxies.update(PROXIES)
-
-    resp = safe_request(
-        "GET", "https://api.ipify.org?format=json", session=session, timeout=10
-    )
-    ip = resp.json().get("ip")
-
-    if PROXIES:
-      logger.info(f"🌐 SCRIPT IP CHECK: Connected via PROXY -> {ip}")
-    else:
-      logger.info(f"🖥️ SCRIPT IP CHECK: Connected via RENDER DIRECT -> {ip}")
-  except Exception as e:
-    logger.warning(f"⚠️ Could not check active IP on startup: {e}")
-
-
-# Force-join channels (optional – leave empty to disable)
 REQUIRED_CHANNELS = [{
     "username": "@XeronLab",
     "invite_link": "https://t.me/XeronLab",
 }]
 
-
 REQUEST_TIMEOUT = 15
 MAX_USAGE_PER_COOKIE = 2
-MAX_COOKIES_TO_TRY = 3  # Maximum cookies to attempt per code submission
+MAX_COOKIES_TO_TRY = 3
 
 # ========== MONGODB SETUP ==========
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
     logger.warning(
-        "MONGO_URI environment variable is missing! Local fallback memory will"
-        " reset on restart."
+        "MONGO_URI environment variable is missing! Local fallback memory will reset on restart."
     )
 
 mongo_client = (
@@ -128,17 +99,16 @@ mongo_client = (
 )
 db = mongo_client["netflix_bot_db"] if mongo_client else None
 
-# Collections
 cookies_col = db["cookies"] if db is not None else None
 stats_col = db["user_stats"] if db is not None else None
 channels_col = db["channels"] if db is not None else None
+users_col = db["known_users"] if db is not None else None
 
-# Local fallback memory if MongoDB isn't connected
 _local_cookies_store = {}
 _local_user_stats = {}
 _local_channels = []
+_local_users = set()
 
-# ========== HEADERS FOR /tv2 API & VALIDATION ==========
 BASE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like"
@@ -157,45 +127,13 @@ BASE_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-User": "?1",
     "Sec-Fetch-Dest": "document",
-    'Sec-Ch-Ua': (
-        '"Quetta";v="143", "Chromium";v="143", "Not A(Brand";v="24"'
-    ),
+    'Sec-Ch-Ua': '"Quetta";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
     "Sec-Ch-Ua-Mobile": "?0",
     'Sec-Ch-Ua-Platform': '"Linux"',
-    'Sec-Ch-Ua-Platform-Version': '""',
-    'Sec-Ch-Ua-Model': '""',
-    "Priority": "u=0, i",
 }
 
 
-# ========== SAFE REQUEST HELPER WITH PROXY FALLBACK ==========
-def safe_request(
-    method: str, url: str, session: requests.Session, **kwargs
-) -> requests.Response:
-    """Executes an HTTP request. If a proxy error or timeout occurs,
-    it falls back automatically to a direct connection.
-    """
-    if "timeout" not in kwargs:
-        kwargs["timeout"] = REQUEST_TIMEOUT
-
-    try:
-        return session.request(method, url, **kwargs)
-    except (
-        requests.exceptions.ProxyError,
-        requests.exceptions.ConnectTimeout,
-        requests.exceptions.ReadTimeout,
-        requests.exceptions.ConnectionError,
-    ) as e:
-        if PROXIES:
-            logger.warning(
-                f"⚠️ Proxy failed for {url} ({e}). Falling back to direct connection..."
-            )
-            kwargs["proxies"] = {}
-            return session.request(method, url, **kwargs)
-        raise e
-
-
-# ========== HELPER FUNCTIONS ==========
+# ========== HELPER & USER TRACKING FUNCTIONS ==========
 async def safe_reply(message, text, **kwargs):
     try:
         if message and hasattr(message, "reply_text"):
@@ -205,96 +143,18 @@ async def safe_reply(message, text, **kwargs):
     return None
 
 
-# ========== IMPROVED COOKIE VALIDATION HELPER ==========
-def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
-    """Checks if a NetflixId cookie is valid, active, paid, and not on hold."""
-    session = requests.Session()
-    if PROXIES:
-        session.proxies.update(PROXIES)
+def register_user(user_id: int):
+    """Stores active user IDs for broadcasting global maintenance alerts."""
+    if users_col is not None:
+        users_col.update_one({"_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
+    else:
+        _local_users.add(user_id)
 
-    session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
-    headers = {
-        "User-Agent": BASE_HEADERS["User-Agent"],
-        "Accept": BASE_HEADERS["Accept"],
-        "Accept-Encoding": BASE_HEADERS["Accept-Encoding"],
-        "Accept-Language": BASE_HEADERS["Accept-Language"],
-        "Referer": "https://www.netflix.com/",
-    }
-    try:
-        r = safe_request(
-            "GET",
-            "https://www.netflix.com/account/membership",
-            session=session,
-            headers=headers,
-            timeout=10,
-            verify=False,
-        )
 
-        if r.status_code != 200 or "currentCountry" not in r.text:
-            return False, "Dead/Expired Cookie"
-
-        lower_text = r.text.lower()
-
-        # 1. Comprehensive Hold & Payment Error Banners
-        hold_indicators = [
-            "membership is on hold",
-            "membership on hold",
-            "payment is on hold",
-            "payment on hold",
-            "update your payment",
-            "update payment info",
-            "account is on hold",
-            "account on hold",
-            "finish sign-up",
-            "finish signup",
-            "restart your membership",
-            "restart membership",
-            "reactivate",
-        ]
-
-        for indicator in hold_indicators:
-            if indicator in lower_text:
-                return False, f"Payment On Hold ({indicator.title()})"
-
-        # 2. Check Netflix Internal JSON Data Flags for Hold States
-        if (
-            '"accountstatus":"hold"' in lower_text
-            or '"ishold":true' in lower_text
-            or '"membershipstatus":"hold"' in lower_text
-            or '"holdstatus":true' in lower_text
-        ):
-            return False, "Payment On Hold (JSON Flag)"
-
-        # 3. Check for Free / Inactive / Cancelled Plans
-        if (
-            "free plan" in lower_text
-            or "no active plan" in lower_text
-            or "cancelled" in lower_text
-        ):
-            return False, "Free/Inactive Plan"
-
-        # 4. Verify Plan Name Exists
-        plan_match = re.search(
-            r'"MemberPlan".*?"localizedPlanName".*?"value":"([^"]+)"',
-            r.text,
-            re.DOTALL,
-        )
-        if not plan_match:
-            plan_match = re.search(r'"localizedPlanName"\s*:\s*"([^"]+)"', r.text)
-
-        if plan_match:
-            plan_name = plan_match.group(1).lower()
-            if "free" in plan_name or "invalid" in plan_name or "hold" in plan_name:
-                return False, f"Unsupported Plan ({plan_name.title()})"
-
-        return True, "OK"
-
-    except Exception as e:
-        logger.warning(f"Cookie check error for {netflix_id[:15]}: {e}")
-        return False, "Connection Error"
-        
-
-        
+def get_all_known_user_ids() -> List[int]:
+    if users_col is not None:
+        return [doc["_id"] for doc in users_col.find({}, {"_id": 1})]
+    return list(_local_users)
 
 
 # ========== MONGODB / PERSISTENCE FUNCTIONS ==========
@@ -402,6 +262,19 @@ def increment_cookie_usage(netflix_id: str) -> bool:
     return False
 
 
+def remove_cookie_by_netflixid_global(netflix_id: str) -> bool:
+    store = load_cookies_store()
+    removed = False
+    for admin_key, entries in store.items():
+        initial_len = len(entries)
+        store[admin_key] = [e for e in entries if e.get("NetflixId") != netflix_id]
+        if len(store[admin_key]) < initial_len:
+            removed = True
+    if removed:
+        save_cookies_store(store)
+    return removed
+
+
 def get_total_remaining_uses() -> int:
     cookies = get_all_cookies_with_metadata()
     total = 0
@@ -421,21 +294,6 @@ def delete_all_cookies() -> bool:
     return True
 
 
-def remove_cookie_by_netflixid(admin_id: int, netflix_id: str) -> bool:
-    store = load_cookies_store()
-    admin_key = str(admin_id)
-    if admin_key not in store:
-        return False
-    original_len = len(store[admin_key])
-    store[admin_key] = [
-        e for e in store[admin_key] if e.get("NetflixId") != netflix_id
-    ]
-    if len(store[admin_key]) < original_len:
-        save_cookies_store(store)
-        return True
-    return False
-
-
 # ========== FORCE JOIN CHECK ==========
 async def check_force_join(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -443,6 +301,7 @@ async def check_force_join(
     if not REQUIRED_CHANNELS:
         return True
     user_id = update.effective_user.id
+    register_user(user_id)
     if user_id in ADMIN_IDS:
         return True
     not_joined = []
@@ -468,7 +327,7 @@ async def check_force_join(
     return True
 
 
-# ========== COOKIE EXTRACTION ==========
+# ========== COOKIE EXTRACTION & ADVANCED VALIDATION ==========
 def extract_netflix_id_from_text(text: str) -> Optional[str]:
     match = re.search(r"netflixid\s*=\s*([^\s;]+)", text, re.IGNORECASE)
     if match:
@@ -503,6 +362,44 @@ def extract_netflix_id_from_text(text: str) -> Optional[str]:
     return None
 
 
+def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
+    """Validates if cookie is active, paid, and not on hold."""
+    session = requests.Session()
+    session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
+    headers = {
+        "User-Agent": BASE_HEADERS["User-Agent"],
+        "Accept": BASE_HEADERS["Accept"],
+        "Accept-Encoding": BASE_HEADERS["Accept-Encoding"],
+        "Accept-Language": BASE_HEADERS["Accept-Language"],
+        "Referer": "https://www.netflix.com/",
+    }
+    try:
+        r = session.get(
+            "https://www.netflix.com/account/membership",
+            headers=headers,
+            timeout=10,
+            verify=False,
+        )
+        if r.status_code != 200 or "currentCountry" not in r.text:
+            return False, "Dead/Expired Cookie"
+
+        lower_text = r.text.lower()
+        if (
+            "payment on hold" in lower_text
+            or "update your payment information" in lower_text
+            or "membership holds" in lower_text
+        ):
+            return False, "Payment On Hold"
+
+        if "free plan" in lower_text or "no active plan" in lower_text:
+            return False, "Free/Inactive Plan"
+
+        return True, "OK"
+    except Exception as e:
+        logger.warning(f"Cookie check error for {netflix_id[:15]}: {e}")
+        return False, "Connection Error"
+
+
 # ========== TV ACTIVATION USING /tv2 API ==========
 def extract_auth_url_from_tv2(html: str) -> Optional[str]:
     patterns = [
@@ -522,19 +419,14 @@ def submit_tv_code(
     netflix_id: str, tv_code: str
 ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[int]]:
     session = requests.Session()
-    if PROXIES:
-        session.proxies.update(PROXIES)
-
     session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     headers = BASE_HEADERS.copy()
     headers["Referer"] = "https://www.netflix.com/tv2"
     headers["Origin"] = "https://www.netflix.com"
 
     try:
-        r = safe_request(
-            "GET",
+        r = session.get(
             "https://www.netflix.com/tv2",
-            session=session,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
             verify=False,
@@ -568,10 +460,8 @@ def submit_tv_code(
     post_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     try:
-        r = safe_request(
-            "POST",
+        r = session.post(
             "https://www.netflix.com/tv2",
-            session=session,
             data=payload,
             headers=post_headers,
             timeout=REQUEST_TIMEOUT,
@@ -602,12 +492,8 @@ def submit_tv_code(
     return False, final_url, cleaned, "Unknown result", status
 
 
-# ========== PLAN & COUNTRY ==========
 def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]:
     sess = requests.Session()
-    if PROXIES:
-        sess.proxies.update(PROXIES)
-
     sess.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     headers = {
         "User-Agent": BASE_HEADERS["User-Agent"],
@@ -617,14 +503,7 @@ def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]
         "Referer": "https://www.netflix.com/",
     }
     try:
-        r = safe_request(
-            "GET",
-            url,
-            session=sess,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-            verify=False,
-        )
+        r = sess.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}"
         content = r.content
@@ -665,21 +544,23 @@ def get_country_and_plan(
 # ========== BOT COMMANDS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        register_user(update.effective_user.id)
         if not await check_force_join(update, context):
             return
     except Exception as e:
         logger.warning(f"Force join check failed: {e}")
     await safe_reply(
         update.message,
-        "WELCOME TO NETFLIX TV LOGIN BOT!\n\n"
-        "⚡ INSTANTLY LOGIN ⚡\n⚡ MIX PLAN LOGIN ⚡\n\n"
-        "MADE BY XERON @xixwv",
+        "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!\n\n"
+        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝗜𝗡⚡\n\n"
+        "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
     )
 
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
+        register_user(user_id)
         is_admin = user_id in ADMIN_IDS
         user_count = get_user_login_count(user_id)
         username = update.effective_user.username or "User"
@@ -703,6 +584,7 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        register_user(update.effective_user.id)
         channels = load_channels()
         if not channels:
             await safe_reply(update.message, "ℹ️ No channels have been added yet.")
@@ -728,6 +610,7 @@ async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        register_user(update.effective_user.id)
         if not await check_force_join(update, context):
             return
     except Exception as e:
@@ -737,9 +620,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await safe_reply(
             update.message,
-            "⚡ Supported Format ⚡\n\n"
-            "/login 12345678\n/login 1234-5678\n\n"
-            "MADE BY XERON @xixwv",
+            "⚡𝑺𝒖𝒑𝒑𝒐𝒓𝒕𝒆𝒅 𝑭𝒐𝒓𝒎𝒂𝒕⚡\n\n"
+            "/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
     raw_code = args[0]
@@ -747,9 +630,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tv_code.isdigit() or len(tv_code) < 5:
         await safe_reply(
             update.message,
-            "LOGIN FAILED THE CODE IS INVALID❌\n\n"
-            "SUPPORTED FORMAT\n/login 1234-5678\n/login 12345678\n\n"
-            "MADE BY XERON @xixwv",
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
+            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
 
@@ -757,17 +640,17 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(
             update.message,
-            "NO COOKIES AVAILABLE CURRENTLY!\n\n"
-            "Please TRY Later!\n\n"
-            "MADE BY XERON @xixwv",
+            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧𝗟𝗬!\n\n"
+            "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 𝗟𝗮𝘁𝗲𝗿!\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
 
-    # Intermediate status feedback
-    status_msg = await safe_reply(update.message, "⌛️ACTIVATING NETFLIX... ")
+    status_msg = await safe_reply(update.message, "⌛️𝐀𝐂𝐓𝐈𝐕𝐀𝐓𝐈𝐍𝐆 𝐍𝐄𝐓𝐅𝐋𝐈𝐗... ")
 
-    # Shuffle valid cookies for load balancing
-    valid_cookies = [c for c in all_cookies if c.get("usage_count", 0) < MAX_USAGE_PER_COOKIE]
+    valid_cookies = [
+        c for c in all_cookies if c.get("usage_count", 0) < MAX_USAGE_PER_COOKIE
+    ]
     random.shuffle(valid_cookies)
     cookies_to_try = valid_cookies[:MAX_COOKIES_TO_TRY]
 
@@ -779,23 +662,25 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for cookie_entry in cookies_to_try:
         netflix_id = cookie_entry["NetflixId"]
 
-        # Run code submission in thread to prevent blocking
+        # Run blocking HTTP request asynchronously
         ok, final_url, cleaned, err_msg, status = await asyncio.to_thread(
             submit_tv_code, netflix_id, tv_code
         )
         if ok:
             increment_cookie_usage(netflix_id)
             increment_user_login(update.effective_user.id)
-            country, plan = await asyncio.to_thread(get_country_and_plan, netflix_id)
+            country, plan = await asyncio.to_thread(
+                get_country_and_plan, netflix_id
+            )
             if not country:
                 country = "Unknown"
                 plan = "Unknown"
 
             success_text = (
-                "⚡YOUR TV HAS BEEN LOGGED IN SUCCESSFULLY!⚡\n\n"
-                f"COUNTRY:❮{country.upper()}❯     ┃  "
-                f" PLAN:❮{plan.upper()}❯\n\n"
-                "MADE BY XERON @xixwv"
+                "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡\n\n"
+                f"ℂ𝕆𝕌ℕ𝕋ℝ𝕐:❮{country.upper()}❯     ┃  "
+                f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯\n\n"
+                "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
             )
 
             if status_msg:
@@ -815,9 +700,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         fail_text = (
-            "LOGIN FAILED THE CODE IS INVALID❌\n\n"
-            "SUPPORTED FORMAT\n/login 1234-5678\n/login 12345678\n\n"
-            "MADE BY XERON @xixwv"
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
+            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
         )
         if status_msg:
             try:
@@ -828,15 +713,92 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply(update.message, fail_text)
 
 
-# ========== ADMIN COMMANDS ==========
+# ========== ADMIN /RECHECK & BROADCAST COMMAND ==========
+async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await safe_reply(update.message, "⛔ Admins only.")
+        return
+
+    all_users = get_all_known_user_ids()
+    maintenance_notice = "⚠️𝖧𝖮𝖴𝖱𝖫𝖸 𝖵𝖠𝖴𝖫𝖳 𝖬𝖠𝖨𝖭𝖳𝖤𝖭𝖠𝖭𝖢𝖤"
+    
+    await safe_reply(update.message, f"📢 Broadcasting maintenance alert to {len(all_users)} users...")
+    
+    success_broadcast = 0
+    for uid in all_users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=maintenance_notice)
+            success_broadcast += 1
+            await asyncio.sleep(0.05)  # Telegram API rate limit guard
+        except Exception:
+            pass
+
+    status_msg = await safe_reply(
+        update.message,
+        f"🔄 **Vault Maintenance Started**\n\nAlert sent to `{success_broadcast}` users.\nChecking database cookies...",
+        parse_mode="Markdown"
+    )
+
+    all_cookies = get_all_cookies_with_metadata()
+    if not all_cookies:
+        await status_msg.edit_text("📭 Database is empty. No cookies to recheck.")
+        return
+
+    total = len(all_cookies)
+    removed_count = 0
+    retained_count = 0
+    checked = 0
+    last_edit_time = time.time()
+
+    def check_task(cookie_entry):
+        netflix_id = cookie_entry["NetflixId"]
+        is_alive, reason = check_if_cookie_alive(netflix_id)
+        return cookie_entry, is_alive, reason
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(check_task, c) for c in all_cookies]
+        for future in futures:
+            entry, is_alive, reason = future.result()
+            checked += 1
+
+            if not is_alive:
+                remove_cookie_by_netflixid_global(entry["NetflixId"])
+                removed_count += 1
+                logger.info(f"Recheck purged {entry['filename']}: {reason}")
+            else:
+                retained_count += 1
+
+            # Time-Lock Guard: Only edit message if 1.5+ seconds passed or at the end
+            current_time = time.time()
+            if (current_time - last_edit_time >= 1.5) or (checked == total):
+                try:
+                    await status_msg.edit_text(
+                        f"🔄 **Vault Maintenance Progress:** `{checked}/{total}`\n\n"
+                        f"🟢 **Alive Retained:** `{retained_count}`\n"
+                        f"🔴 **Dead Removed:** `{removed_count}`",
+                        parse_mode="Markdown"
+                    )
+                    last_edit_time = current_time
+                except Exception:
+                    pass
+
+    await status_msg.edit_text(
+        "✅ **Vault Maintenance Completed!**\n\n"
+        f"👥 **Users Notified:** `{success_broadcast}`\n"
+        f"🟢 **Alive Cookies Retained:** `{retained_count}`\n"
+        f"🗑️ **Dead Cookies Cleaned:** `{removed_count}`",
+        parse_mode="Markdown"
+    )
+
+
+# ========== OTHER ADMIN COMMANDS ==========
 async def addsingle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
         return
-    context.user_data["awaiting_bulk_file"] = False
     context.user_data["awaiting_single_file"] = True
     await safe_reply(
-        update.message, "📤 Please send the single cookie file (.txt or .json)"
+        update.message, "📤 Please send the cookie file (.txt or .json)"
     )
 
 
@@ -844,30 +806,11 @@ async def bulkadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
         return
-    context.user_data["awaiting_single_file"] = False
-    context.user_data["awaiting_bulk_file"] = True
     await safe_reply(
         update.message,
-        "📦 Send your `.zip` or `.rar` file containing cookie files.",
-        parse_mode="Markdown",
+        "/BulkAdd 𝔸𝔻𝔻 𝕄𝕌𝕃𝕋𝕀ℙ𝕃𝔼 ℂ𝕆𝕆𝕂𝕀𝔼𝕊 𝔽𝕀𝕃𝔼 𝕊𝕌ℙℙ𝕆ℝ𝕋𝔼𝔻 𝔽𝕆ℝ𝕄𝔸𝕋 .𝕫𝕚𝕡 𝕒𝕟𝕕 .𝕣𝕒𝕣",
     )
-
-
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await safe_reply(update.message, "⛔ Admins only.")
-        return
-
-    if not cancel_bulk_event.is_set():
-        cancel_bulk_event.set()
-        await safe_reply(
-            update.message,
-            "🛑 **Stopping bulk check process...** Please wait a moment for the"
-            " current item to finish.",
-            parse_mode="Markdown",
-        )
-    else:
-        await safe_reply(update.message, "ℹ️ No bulk process is currently running.")
+    context.user_data["awaiting_bulk_file"] = True
 
 
 async def delall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -876,8 +819,7 @@ async def delall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await safe_reply(
         update.message,
-        "⚠️ Are you sure you want to DELETE ALL cookies? This cannot be"
-        " undone.\nSend `/delall_confirm` to proceed.",
+        "⚠️ Are you sure you want to DELETE ALL cookies? Send `/delall_confirm` to proceed.",
         parse_mode="Markdown",
     )
 
@@ -902,8 +844,7 @@ async def list_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["📋🍪 *STORED COOKIES* 🍪📋\n"]
     for c in all_cookies:
         lines.append(
-            f"• `{c['filename']}` → NetflixId: `{c['NetflixId'][:20]}...` (used"
-            f" {c['usage_count']}/{MAX_USAGE_PER_COOKIE})"
+            f"• `{c['filename']}` → NetflixId: `{c['NetflixId'][:20]}...` (used {c['usage_count']}/{MAX_USAGE_PER_COOKIE})"
         )
     await safe_reply(update.message, "\n".join(lines), parse_mode="Markdown")
 
@@ -915,66 +856,56 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         await safe_reply(
-            update.message,
-            "Usage: `/delcookie NetflixId_value`",
-            parse_mode="Markdown",
+            update.message, "Usage: `/delcookie NetflixId_value`", parse_mode="Markdown"
         )
         return
     netflix_id = args[0]
-    if remove_cookie_by_netflixid(update.effective_user.id, netflix_id):
+    if remove_cookie_by_netflixid_global(netflix_id):
         await safe_reply(
             update.message, f"🗑️✅ Cookie `{netflix_id[:15]}...` removed."
         )
     else:
-        await safe_reply(
-            update.message, "❌ Cookie not found or you don't own it."
-        )
+        await safe_reply(update.message, "❌ Cookie not found or you don't own it.")
 
 
-# ========== FILE HANDLER WITH STOP CONTROL & AUTO-DETECTION ==========
+# ========== FILE HANDLER WITH TIME-LOCKED PROGRESS ==========
+def process_single_cookie_task(fname: str, content: str, admin_id: int):
+    netflix_id = extract_netflix_id_from_text(content)
+    if not netflix_id:
+        return False, "No NetflixId"
+    is_alive, reason = check_if_cookie_alive(netflix_id)
+    if is_alive:
+        success, msg = add_cookie_with_metadata(admin_id, fname, netflix_id)
+        if success:
+            return True, "OK"
+        return False, "Duplicate"
+    return False, reason
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Only admins can add cookies.")
         return
-
     document = update.message.document
     if not document:
         return
-
     file_name = document.file_name.lower()
 
     if document.file_size > 5 * 1024 * 1024:
         await safe_reply(
-            update.message,
-            "❌ File too large (max 5 MB). Please split your cookie file.",
+            update.message, "❌ File too large (max 5 MB)."
         )
         return
 
-    is_bulk = context.user_data.get("awaiting_bulk_file", False)
-    is_single = context.user_data.get("awaiting_single_file", False)
+    status_msg = await safe_reply(
+        update.message, "📥 Downloading and checking cookie validity..."
+    )
 
-    # Clean flags once received
-    context.user_data["awaiting_single_file"] = False
-    context.user_data["awaiting_bulk_file"] = False
-
-    # Auto-detection if command wasn't called right before
-    if not is_bulk and not is_single:
-        if file_name.endswith((".zip", ".rar")):
-            is_bulk = True
-        elif file_name.endswith((".txt", ".json")):
-            is_single = True
-        else:
-            await safe_reply(update.message, "⚠️ Send /addsingle or /bulkadd first.")
-            return
-
-    status_msg = await safe_reply(update.message, "📥 Downloading file...")
-
-    # --- SINGLE FILE UPLOAD ---
-    if is_single:
+    if context.user_data.get("awaiting_single_file"):
+        context.user_data.pop("awaiting_single_file")
         if not (file_name.endswith(".txt") or file_name.endswith(".json")):
-            if status_msg:
-                await status_msg.edit_text("❌ Only .txt or .json files are accepted.")
+            await status_msg.edit_text("❌ Only .txt or .json files are accepted.")
             return
 
         file = await context.bot.get_file(document.file_id)
@@ -983,123 +914,104 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         netflix_id = extract_netflix_id_from_text(content)
 
         if not netflix_id:
-            if status_msg:
-                await status_msg.edit_text("❌ No valid NetflixId found in file.")
+            await status_msg.edit_text("❌ No valid NetflixId found in the file.")
             return
 
-        if status_msg:
-            await status_msg.edit_text("🔍 Checking cookie validity...")
-
-        is_alive, reason = await asyncio.to_thread(check_if_cookie_alive, netflix_id)
-
+        is_alive, reason = await asyncio.to_thread(
+            check_if_cookie_alive, netflix_id
+        )
         if not is_alive:
-            if status_msg:
-                await status_msg.edit_text(
-                    f"❌ **Cookie Rejected:** `{reason}`", parse_mode="Markdown"
-                )
+            await status_msg.edit_text(
+                f"❌ **Cookie Rejected:** `{reason}`", parse_mode="Markdown"
+            )
             return
 
         success, msg = add_cookie_with_metadata(
             user.id, document.file_name, netflix_id
         )
         if success:
-            if status_msg:
-                await status_msg.edit_text(
-                    f"✅ **Valid Cookie Added:** `{document.file_name}`\nNetflixId:"
-                    f" `{netflix_id[:20]}...`",
-                    parse_mode="Markdown",
-                )
+            await status_msg.edit_text(
+                f"✅ **Alive Cookie Added:** `{document.file_name}`",
+                parse_mode="Markdown",
+            )
         else:
-            if status_msg:
-                await status_msg.edit_text("⚠️ Cookie already exists.")
+            await status_msg.edit_text("⚠️ Cookie already exists in storage.")
         return
 
-    # --- BULK FILE UPLOAD (.ZIP / .RAR) ---
-    if is_bulk:
+    if context.user_data.get("awaiting_bulk_file"):
+        context.user_data.pop("awaiting_bulk_file")
         if not (
             file_name.endswith(".zip") or (RAR_SUPPORT and file_name.endswith(".rar"))
         ):
-            if status_msg:
-                await status_msg.edit_text("❌ Please upload a .zip or .rar file.")
+            await status_msg.edit_text("❌ Please upload a .zip or .rar file.")
             return
 
-        # Clear any previous cancel event before starting
-        cancel_bulk_event.clear()
-
-        if status_msg:
-            await status_msg.edit_text(
-                "📦 Unpacking and checking accounts...\n\n💡 Send /stop anytime to halt the process."
-            )
-
+        await status_msg.edit_text("📦 Extracting archive...")
         file = await context.bot.get_file(document.file_id)
         raw_data = await file.download_as_bytearray()
 
-        added = 0
-        rejected = 0
-        duplicates = 0
-        was_stopped = False
+        files_to_process = []
+        if file_name.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
+                for fname in zf.namelist():
+                    if fname.lower().endswith((".txt", ".json")):
+                        content = zf.read(fname).decode("utf-8", errors="ignore")
+                        files_to_process.append((fname, content))
+        elif RAR_SUPPORT and file_name.endswith(".rar"):
+            with rarfile.RarFile(io.BytesIO(raw_data)) as rf:
+                for fname in rf.namelist():
+                    if fname.lower().endswith((".txt", ".json")):
+                        content = rf.read(fname).decode("utf-8", errors="ignore")
+                        files_to_process.append((fname, content))
 
-        def process_bulk_files():
-            nonlocal added, rejected, duplicates, was_stopped
-            entries = []
+        total_files = len(files_to_process)
+        if total_files == 0:
+            await status_msg.edit_text("❌ No valid .txt or .json files found in archive.")
+            return
 
-            if file_name.endswith(".zip"):
-                with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
-                    for fname in zf.namelist():
-                        if fname.lower().endswith((".txt", ".json")):
-                            content = zf.read(fname).decode("utf-8", errors="ignore")
-                            nid = extract_netflix_id_from_text(content)
-                            if nid:
-                                entries.append((fname, nid))
+        added, dead, dupes = 0, 0, 0
+        processed = 0
+        last_edit_time = time.time()
 
-            elif RAR_SUPPORT and file_name.endswith(".rar"):
-                with rarfile.RarFile(io.BytesIO(raw_data)) as rf:
-                    for fname in rf.namelist():
-                        if fname.lower().endswith((".txt", ".json")):
-                            content = rf.read(fname).decode("utf-8", errors="ignore")
-                            nid = extract_netflix_id_from_text(content)
-                            if nid:
-                                entries.append((fname, nid))
-
-            logger.info(f"📦 Unpacked {len(entries)} cookie files. Starting validation...")
-
-            for i, (fname, nid) in enumerate(entries, 1):
-                if cancel_bulk_event.is_set():
-                    logger.info("🛑 Bulk checking stopped by admin command.")
-                    was_stopped = True
-                    break
-
-                logger.info(f"🔍 [{i}/{len(entries)}] Validating {fname}...")
-                is_alive, reason = check_if_cookie_alive(nid)
-                if is_alive:
-                    success, _ = add_cookie_with_metadata(user.id, fname, nid)
-                    if success:
-                        logger.info(f"🟢 [{i}/{len(entries)}] ADDED: {fname}")
-                        added += 1
-                    else:
-                        logger.info(f"🟡 [{i}/{len(entries)}] DUPLICATE: {fname}")
-                        duplicates += 1
+        # Parallel execution with Time-Lock guard for 100+ files
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(process_single_cookie_task, fname, content, user.id)
+                for fname, content in files_to_process
+            ]
+            for future in futures:
+                ok, res = future.result()
+                processed += 1
+                if ok:
+                    added += 1
+                elif res == "Duplicate":
+                    dupes += 1
                 else:
-                    logger.info(f"🔴 [{i}/{len(entries)}] REJECTED ({reason}): {fname}")
-                    rejected += 1
+                    dead += 1
 
-        await asyncio.to_thread(process_bulk_files)
+                # Time-Lock Guard: Only update UI if 1.5+ seconds elapsed or at final file
+                current_time = time.time()
+                if (current_time - last_edit_time >= 1.5) or (processed == total_files):
+                    try:
+                        await status_msg.edit_text(
+                            f"⏳ **Checking Cookies:** `{processed}/{total_files}`\n\n"
+                            f"🟢 **Alive:** `{added}` | 🔴 **Dead:** `{dead}` | ⚠️ **Dupes:** `{dupes}`",
+                            parse_mode="Markdown"
+                        )
+                        last_edit_time = current_time
+                    except Exception:
+                        pass
 
-        status_title = (
-            "🛑 **Bulk Check Stopped Manually!**"
-            if was_stopped
-            else "✅ **Bulk Upload Processed!**"
+        await status_msg.edit_text(
+            "✅ **Bulk Upload Finished!**\n\n"
+            f"🟢 **Alive Added:** `{added}`\n"
+            f"🔴 **Rejected/Dead:** `{dead}`\n"
+            f"⚠️ **Duplicates:** `{dupes}`",
+            parse_mode="Markdown",
         )
-
-        if status_msg:
-            await status_msg.edit_text(
-                f"{status_title}\n\n"
-                f"🟢 **Valid Added:** `{added}`\n"
-                f"🔴 **Rejected (Dead/Hold/Free):** `{rejected}`\n"
-                f"⚠️ **Duplicates Skipped:** `{duplicates}`",
-                parse_mode="Markdown",
-            )
         return
+
+    await safe_reply(update.message, "Use /addsingle or /bulkadd first.")
 
 
 # ========== SET COMMANDS ==========
@@ -1114,7 +1026,7 @@ async def set_commands(app: Application):
     admin_commands = default_commands + [
         BotCommand("addsingle", "Add a single cookie"),
         BotCommand("bulkadd", "Add ZIP/RAR of cookies"),
-        BotCommand("stop", "Stop active bulk checking"),
+        BotCommand("recheck", "Recheck DB & broadcast notice"),
         BotCommand("listcookies", "Show all cookies"),
         BotCommand("delcookie", "Delete a cookie"),
         BotCommand("delall", "Delete all cookies"),
@@ -1131,21 +1043,16 @@ async def set_commands(app: Application):
 # ========== MAIN ==========
 def main():
     if not BOT_TOKEN:
-        print("x Please set your BOT_TOKEN in the script.")
+        print("❌ Please set your BOT_TOKEN in the script.")
         return
-
-    # Call IP verification here before bot launches
-    check_active_ip()
-
     app = Application.builder().token(BOT_TOKEN).build()
- 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login_command))
     app.add_handler(CommandHandler("panel", panel_command))
     app.add_handler(CommandHandler("channels", channels_command))
     app.add_handler(CommandHandler("addsingle", addsingle_command))
     app.add_handler(CommandHandler("bulkadd", bulkadd_command))
-    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("recheck", recheck_command))
     app.add_handler(CommandHandler("delall", delall_command))
     app.add_handler(CommandHandler("delall_confirm", delall_confirm))
     app.add_handler(CommandHandler("listcookies", list_cookies))
