@@ -68,7 +68,7 @@ except ImportError:
     RAR_SUPPORT = False
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8643705076:AAExVtZYb-PQMAbW3T7uk2LWjKkBEUPWXQg"  # Hardcoded token
+BOT_TOKEN = "8643705076:AAE4OT07CYLCFQzJfvuET7vlBhaHGGwWeV4"  # Hardcoded token
 ADMIN_IDS = [6420446828]  # Your Telegram user IDs
 
 REQUIRED_CHANNELS = [{
