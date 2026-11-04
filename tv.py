@@ -224,7 +224,9 @@ async def sanitize_proxy_pool(status_msg=None) -> int:
 
         if dead_ids:
             proxies_col.delete_many({"_id": {"$in": dead_ids}})
-            logger.info(f"Pre-flight check purged {len(dead_ids)} dead proxies from database.")
+            logger.info(
+                f"Pre-flight check purged {len(dead_ids)} dead proxies from database."
+            )
 
         return live_count
     else:
@@ -412,14 +414,10 @@ async def check_force_join(
         except Exception:
             not_joined.append(channel)
     if not_joined:
-        msg = "⚠️ *You must join the following channel(s) to use this bot:*
-
-"
+        msg = "⚠️ *You must join the following channel(s) to use this bot:*\n\n"
         for ch in not_joined:
-            msg += f"• [{ch['username']}]({ch['invite_link']})
-"
-        msg += "
-After joining, send /start again."
+            msg += f"• [{ch['username']}]({ch['invite_link']})\n"
+        msg += "\nAfter joining, send /start again."
         await safe_reply(
             update.message,
             msg,
@@ -690,13 +688,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Force join check failed: {e}")
     await safe_reply(
         update.message,
-        "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!
-
-"
-        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡
-⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝕀ℕ⚡
-
-"
+        "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!\n\n"
+        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝕀ℕ⚡\n\n"
         "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
     )
 
@@ -709,23 +702,16 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_count = get_user_login_count(user_id)
         username = update.effective_user.username or "User"
         text = (
-            f"📊 *Panel for {username}*
-
-✅ *Your successful logins:*"
+            f"📊 *Panel for {username}*\n\n✅ *Your successful logins:*"
             f" `{user_count}`"
         )
         if is_admin:
             total_logins_all = get_total_logins_all_users()
             total_cookies = get_total_cookie_count()
             remaining_uses = get_total_remaining_uses()
-            text += "
-
---- *Global Stats (Admin)* ---
-"
-            text += f"🍪 *Cookies stored:* `{total_cookies}`
-"
-            text += f"🔁 *Remaining uses:* `{remaining_uses}`
-"
+            text += "\n\n--- *Global Stats (Admin)* ---\n"
+            text += f"🍪 *Cookies stored:* `{total_cookies}`\n"
+            text += f"🔁 *Remaining uses:* `{remaining_uses}`\n"
             text += f"👥 *Total user logins:* `{total_logins_all}`"
         await safe_reply(update.message, text, parse_mode="Markdown")
     except Exception as e:
@@ -748,16 +734,11 @@ async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 name = f"ID {cid}"
             channel_list.append(name)
-        text = "📢 *Approved Channels* (first 5):
-
-" + "
-".join(
+        text = "📢 *Approved Channels* (first 5):\n\n" + "\n".join(
             f"• {name}" for name in channel_list
         )
         if len(channels) > 5:
-            text += f"
-
-... and {len(channels)-5} more."
+            text += f"\n\n... and {len(channels)-5} more."
         await safe_reply(update.message, text, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Channels error: {e}")
@@ -782,12 +763,7 @@ async def addproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await safe_reply(
             update.message,
-            "⚠️ **Usage:**
-`/addproxy user:pass:host:port`
-or
-`/addproxy host:port:user:pass`
-
-Multiple proxies can be separated by spaces.",
+            "⚠️ **Usage:**\n`/addproxy user:pass:host:port`\nor\n`/addproxy host:port:user:pass`\n\nMultiple proxies can be separated by spaces.",
             parse_mode="Markdown",
         )
         return
@@ -809,11 +785,8 @@ Multiple proxies can be separated by spaces.",
             failed += 1
 
     await status_msg.edit_text(
-        "✅ **Proxy Import Complete!**
-
-"
-        f"🟢 **Working Added:** `{added}`
-"
+        "✅ **Proxy Import Complete!**\n\n"
+        f"🟢 **Working Added:** `{added}`\n"
         f"🔴 **Failed/Invalid:** `{failed}`",
         parse_mode="Markdown",
     )
@@ -831,9 +804,7 @@ async def listproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await safe_reply(
         update.message,
-        f"🌐 **Proxy Pool Stats:**
-
-Active proxies in database: `{count}`",
+        f"🌐 **Proxy Pool Stats:**\n\nActive proxies in database: `{count}`",
         parse_mode="Markdown",
     )
 
@@ -852,9 +823,7 @@ async def clearproxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await safe_reply(
         update.message,
-        f"🗑️✅ **Proxy Pool Cleared!**
-
-Removed `{deleted_count}` proxy entry/entries from storage.",
+        f"🗑️✅ **Proxy Pool Cleared!**\n\nRemoved `{deleted_count}` proxy entry/entries from storage.",
         parse_mode="Markdown",
     )
 
@@ -871,13 +840,8 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await safe_reply(
             update.message,
-            "⚡𝑺𝒖𝒑𝒑𝒐𝒓𝒕𝒆𝒅 𝑭𝒐𝒓𝒎𝒂𝒕⚡
-
-"
-            "/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴
-/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴
-
-"
+            "⚡𝑺𝒖𝒑𝒑𝒐𝒓𝒕𝒆𝒅 𝑭𝒐𝒓𝒎𝒂𝒕⚡\n\n"
+            "/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
@@ -886,14 +850,8 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tv_code.isdigit() or len(tv_code) < 5:
         await safe_reply(
             update.message,
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌
-
-"
-            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧
-/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴
-/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴
-
-"
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌\n\n"
+            "ＳＵＰＰＯＲＴＥＤ ＦＯＲＭＡＴ\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
@@ -902,12 +860,8 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(
             update.message,
-            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜🇱𝗔🇧🇱𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧𝕃𝕐!
-
-"
-            "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 𝗟𝗮𝘁𝗲𝗿!
-
-"
+            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜🇱𝗔🇧🇱𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧𝕃𝕐!\n\n"
+            "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 𝗟𝗮𝘁𝗲𝗿!\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
@@ -938,13 +892,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 plan = "Unknown"
 
             success_text = (
-                "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡
-
-"
+                "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡\n\n"
                 f"ℂ𝕆𝕌ℕ𝕋ℝ𝕐:❮{country.upper()}❯     ┃  "
-                f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯
-
-"
+                f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯\n\n"
                 "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
             )
 
@@ -965,14 +915,8 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         fail_text = (
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌
-
-"
-            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧
-/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴
-/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴
-
-"
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌\n\n"
+            "ＳＵＰＰＯＲＴＥＤ ＦＯＲＭＡＴ\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
         )
         if status_msg:
@@ -1010,10 +954,7 @@ async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await safe_reply(
         update.message,
-        f"🔄 **Vault Maintenance Started**
-
-Alert sent to `{success_broadcast}` users.
-Checking database cookies...",
+        f"🔄 **Vault Maintenance Started**\n\nAlert sent to `{success_broadcast}` users.\nChecking database cookies...",
         parse_mode="Markdown"
     )
 
@@ -1055,11 +996,8 @@ Checking database cookies...",
             if (current_time - last_edit_time >= 1.5) or (checked == total):
                 try:
                     await status_msg.edit_text(
-                        f"🔄 **Vault Maintenance Progress:** `{checked}/{total}`
-
-"
-                        f"🟢 **Alive Retained:** `{retained_count}`
-"
+                        f"🔄 **Vault Maintenance Progress:** `{checked}/{total}`\n\n"
+                        f"🟢 **Alive Retained:** `{retained_count}`\n"
                         f"🔴 **Dead Removed:** `{removed_count}`",
                         parse_mode="Markdown"
                     )
@@ -1069,13 +1007,9 @@ Checking database cookies...",
 
     status_prefix = "🛑 **Vault Maintenance Stopped!**" if stop_requested else "✅ **Vault Maintenance Completed!**"
     await status_msg.edit_text(
-        f"{status_prefix}
-
-"
-        f"👥 **Users Notified:** `{success_broadcast}`
-"
-        f"🟢 **Alive Cookies Retained:** `{retained_count}`
-"
+        f"{status_prefix}\n\n"
+        f"👥 **Users Notified:** `{success_broadcast}`\n"
+        f"🟢 **Alive Cookies Retained:** `{retained_count}`\n"
         f"🗑️ **Dead Cookies Cleaned:** `{removed_count}`",
         parse_mode="Markdown"
     )
@@ -1110,14 +1044,12 @@ async def list_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(update.message, "📭 No cookies stored.")
         return
-    lines = ["📋🍪 *STORED COOKIES* 🍪📋
-"]
+    lines = ["📋🍪 *STORED COOKIES* 🍪📋\n"]
     for c in all_cookies:
         lines.append(
             f"• `{c['filename']}` → NetflixId: `{c['NetflixId'][:20]}...` (used {c['usage_count']}/{MAX_USAGE_PER_COOKIE})"
         )
-    await safe_reply(update.message, "
-".join(lines), parse_mode="Markdown")
+    await safe_reply(update.message, "\n".join(lines), parse_mode="Markdown")
 
 
 async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1139,7 +1071,7 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update.message, "❌ Cookie not found or you don't own it.")
 
 
-# ========== FILE HANDLER WITH AUTO-DETECTION & PRE-FLIGHT PROXY CHECK ==========
+# ========== FILE HANDLER WITH AUTO-DETECTION & INSTANT STOP ==========
 def process_single_cookie_task(fname: str, content: str, admin_id: int):
     if stop_requested:
         return False, "Stopped"
@@ -1232,15 +1164,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ No valid .txt or .json files found in archive.")
             return
 
-        # Pre-Flight Proxy Sanitation
+        # Pre-Flight Proxy Sanitation Check
         live_proxies = await sanitize_proxy_pool(status_msg)
         if live_proxies == 0:
             await status_msg.edit_text(
-                "⚠️ **No Live Proxies Available!**
-
-"
-                "All stored proxies failed connection tests or none were added.
-"
+                "⚠️ **No Live Proxies Available!**\n\n"
+                "All stored proxies failed connection tests or none were added.\n"
                 "Please add working proxies using `/addproxy user:pass:host:port` and re-upload your archive.",
                 parse_mode="Markdown",
             )
@@ -1275,12 +1204,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if (current_time - last_edit_time >= 1.5) or (processed == total_files):
                     try:
                         await status_msg.edit_text(
-                            f"⏳ **Checking Cookies ({live_proxies} proxies active):** `{processed}/{total_files}`
-
-"
-                            f"🟢 **Alive:** `{added}` | 🔴 **Dead:** `{dead}` | ⚠️ **Dupes:** `{dupes}`
-
-"
+                            f"⏳ **Checking Cookies:** `{processed}/{total_files}`\n\n"
+                            f"🟢 **Alive:** `{added}` | 🔴 **Dead:** `{dead}` | ⚠️ **Dupes:** `{dupes}`\n\n"
                             f"🛑 Send /stop to cancel.",
                             parse_mode="Markdown"
                         )
@@ -1290,13 +1215,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         status_prefix = "🛑 **Bulk Upload Stopped!**" if stop_requested else "✅ **Bulk Upload Finished!**"
         await status_msg.edit_text(
-            f"{status_prefix}
-
-"
-            f"🟢 **Alive Added:** `{added}`
-"
-            f"🔴 **Rejected/Dead:** `{dead}`
-"
+            f"{status_prefix}\n\n"
+            f"🟢 **Alive Added:** `{added}`\n"
+            f"🔴 **Rejected/Dead:** `{dead}`\n"
             f"⚠️ **Duplicates:** `{dupes}`",
             parse_mode="Markdown",
         )
@@ -1317,7 +1238,7 @@ async def set_commands(app: Application):
     admin_commands = default_commands + [
         BotCommand("addproxy", "Add proxy (user:pass:host:port)"),
         BotCommand("listproxies", "Show active proxies count"),
-        BotCommand("clearproxies", "Delete all stored proxies"),
+        BotCommand("clearproxies", "Delete all proxies from database"),
         BotCommand("recheck", "Recheck DB & broadcast notice"),
         BotCommand("stop", "Stop active bulk checking"),
         BotCommand("listcookies", "Show all cookies"),
