@@ -35,7 +35,7 @@ filters,
 
 # ========== BACKGROUND FLASK WEB SERVER (FOR RENDER HEALTH CHECKS) ==========
 
-app_flask = Flask(**name**)
+app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
