@@ -191,50 +191,6 @@ def get_random_proxy() -> Optional[Dict[str, str]]:
     return None
 
 
-async def sanitize_proxy_pool(status_msg=None) -> int:
-    """Tests all stored proxies in parallel, deletes dead ones, and returns live count."""
-    if proxies_col is not None:
-        docs = list(proxies_col.find({}))
-        if not docs:
-            return 0
-
-        if status_msg:
-            try:
-                await status_msg.edit_text(
-                    f"🔍 **Sanitizing Proxy Pool:** Testing `{len(docs)}` saved proxies..."
-                )
-            except Exception:
-                pass
-
-        live_count = 0
-        dead_ids = []
-
-        def check_p(doc):
-            is_ok = test_proxy_connection(doc["formatted"])
-            return doc["_id"], is_ok
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(check_p, doc) for doc in docs]
-            for future in futures:
-                proxy_id, is_ok = future.result()
-                if is_ok:
-                    live_count += 1
-                else:
-                    dead_ids.append(proxy_id)
-
-        if dead_ids:
-            proxies_col.delete_many({"_id": {"$in": dead_ids}})
-            logger.info(
-                f"Pre-flight check purged {len(dead_ids)} dead proxies from database."
-            )
-
-        return live_count
-    else:
-        global _local_proxies
-        _local_proxies = [p for p in _local_proxies if test_proxy_connection(p)]
-        return len(_local_proxies)
-
-
 # ========== HELPER & USER TRACKING FUNCTIONS ==========
 async def safe_reply(message, text, **kwargs):
     try:
@@ -537,8 +493,8 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
 def extract_auth_url_from_tv2(html: str) -> Optional[str]:
     patterns = [
         r'name="authURL"\s+value="([^"]+)"',
-        r'authURL["']?\s*[:=]\s*["']([^"]+)["']',
-        r"authURL=([^&\s"']+)",
+        r'authURL["\']?\s*[:=]\s*["\']([^"]+)["\']',
+        r"authURL=([^&\s\"']+)",
         r'value="(c1\.[^"]+)"',
     ]
     for pat in patterns:
@@ -809,25 +765,6 @@ async def listproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def clearproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await safe_reply(update.message, "⛔ Admins only.")
-        return
-
-    global _local_proxies
-    if proxies_col is not None:
-        deleted_count = proxies_col.delete_many({}).deleted_count
-    else:
-        deleted_count = len(_local_proxies)
-        _local_proxies.clear()
-
-    await safe_reply(
-        update.message,
-        f"🗑️✅ **Proxy Pool Cleared!**\n\nRemoved `{deleted_count}` proxy entry/entries from storage.",
-        parse_mode="Markdown",
-    )
-
-
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         register_user(update.effective_user.id)
@@ -851,7 +788,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(
             update.message,
             "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌\n\n"
-            "ＳＵＰＰＯＲＴＥＤ ＦＯＲＭＡＴ\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
+            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
@@ -916,7 +853,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not success:
         fail_text = (
             "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌\n\n"
-            "ＳＵＰＰＯＲＴＥＤ ＦＯＲＭＡＴ\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
+            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
         )
         if status_msg:
@@ -1164,17 +1101,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ No valid .txt or .json files found in archive.")
             return
 
-        # Pre-Flight Proxy Sanitation Check
-        live_proxies = await sanitize_proxy_pool(status_msg)
-        if live_proxies == 0:
-            await status_msg.edit_text(
-                "⚠️ **No Live Proxies Available!**\n\n"
-                "All stored proxies failed connection tests or none were added.\n"
-                "Please add working proxies using `/addproxy user:pass:host:port` and re-upload your archive.",
-                parse_mode="Markdown",
-            )
-            return
-
         added, dead, dupes = 0, 0, 0
         processed = 0
         last_edit_time = time.time()
@@ -1238,7 +1164,6 @@ async def set_commands(app: Application):
     admin_commands = default_commands + [
         BotCommand("addproxy", "Add proxy (user:pass:host:port)"),
         BotCommand("listproxies", "Show active proxies count"),
-        BotCommand("clearproxies", "Delete all proxies from database"),
         BotCommand("recheck", "Recheck DB & broadcast notice"),
         BotCommand("stop", "Stop active bulk checking"),
         BotCommand("listcookies", "Show all cookies"),
@@ -1266,7 +1191,6 @@ def main():
     app.add_handler(CommandHandler("channels", channels_command))
     app.add_handler(CommandHandler("addproxy", addproxy_command))
     app.add_handler(CommandHandler("listproxies", listproxies_command))
-    app.add_handler(CommandHandler("clearproxies", clearproxies_command))
     app.add_handler(CommandHandler("recheck", recheck_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("delall", delall_command))
