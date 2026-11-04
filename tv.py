@@ -39,7 +39,7 @@ app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
-return "Bot is running fine!", 200
+    return "Bot is running fine!", 200
 
 @app_flask.route("/health")
 def health():
