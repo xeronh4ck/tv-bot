@@ -689,8 +689,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(
         update.message,
         "𝕎𝔼𝕃ℂ𝕆𝕄𝔼 𝕋𝕆 ℕ𝔼𝕋𝔽𝕃𝕀𝕏 𝕋𝕍 𝕃𝕆𝔾𝕀ℕ 𝔹𝕆𝕋!\n\n"
-        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣🇱𝗔𝗡 𝗟𝗢𝗚𝕀ℕ⚡\n\n"
-        "𝗠𝗔🇩🇪 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+        "⚡𝗜𝗡𝗦𝗧𝗔𝗡𝗧𝗟𝗬 𝗟𝗢𝗚𝗜𝗡⚡\n⚡𝗠𝗜𝗫 𝗣𝗟𝗔𝗡 𝗟𝗢𝗚𝗜𝗡⚡\n\n"
+        "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
     )
 
 
@@ -842,7 +842,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message,
             "⚡𝑺𝒖𝒑𝒑𝒐𝒓𝒕𝒆𝒅 𝑭𝒐𝒓𝒎𝒂𝒕⚡\n\n"
             "/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n\n"
-            " 𝗠𝗔🇩🇪 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
     raw_code = args[0]
@@ -850,9 +850,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tv_code.isdigit() or len(tv_code) < 5:
         await safe_reply(
             update.message,
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜🇱🇪𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔🇱🇮🇩❌\n\n"
-            "ＳＵＰＰＯＲＴＥＤ ＦＯＲＭＡＴ\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
-            " 𝗠𝗔🇩🇪 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
+            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
 
@@ -860,9 +860,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_cookies:
         await safe_reply(
             update.message,
-            "𝗡𝗢 𝗖𝗢𝗢🇰𝗜🇪🇸 𝗔𝗩𝗔𝗜🇱🇦🇧🇱🇪 𝗖𝗨🇷🇷🇪𝗡𝗧𝕃𝕐!\n\n"
-            "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗥𝗬 🇱𝗮𝘁𝗲𝗿!\n\n"
-            " 𝗠𝗔🇩🇪 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
+            "ℕ𝕆 ℂ𝕆𝕆𝕂𝕀𝔼𝕊 𝔸𝕍𝔸𝕀𝕃𝔸𝔹𝕃𝔼 ℂ𝕌ℝℝ𝔼ℕ𝕋𝕃𝕐!\n\n"
+            "𝗣𝗹𝗲𝗮𝘀𝗲 𝗧𝗿𝘆 𝗟𝗮𝘁𝗲𝗿!\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃",
         )
         return
 
@@ -895,7 +895,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⚡𝐘𝐎𝐔𝐑 𝐓𝐕 𝐇𝐀𝐒 𝐁𝐄𝐄𝐍 𝐋𝐎𝐆𝐆𝐄𝐃 𝐈𝐍 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋𝐋𝐘!⚡\n\n"
                 f"ℂ𝕆𝕌ℕ𝕋ℝ𝕐:❮{country.upper()}❯     ┃  "
                 f" ℙ𝕃𝔸ℕ:❮{plan.upper()}❯\n\n"
-                "𝗠𝗔🇩🇪 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
+                "𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
             )
 
             if status_msg:
@@ -915,9 +915,9 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         fail_text = (
-            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔🇮🇱🇪🇩 𝗧𝗛𝗘 𝗖𝗢🇩🇪 𝗜𝗦 𝗜𝗡𝗩𝗔🇱🇮🇩❌\n\n"
-            "ＳＵＰＰＯＲＴＥＤ ＦＯＲＭＡＴ\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
-            " 𝗠𝗔🇩🇪 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
+            "𝗟𝗢𝗚𝗜𝗡 𝗙𝗔𝗜𝗟𝗘𝗗 𝗧𝗛𝗘 𝗖𝗢𝗗𝗘 𝗜𝗦 𝗜𝗡𝗩𝗔𝗟𝗜𝗗❌\n\n"
+            "𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗙𝗢𝗥𝗠𝗔𝗧\n/𝗟𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰-𝟱𝟲𝟳𝟴\n/𝗹𝗼𝗴𝗶𝗻 𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴\n\n"
+            " 𝗠𝗔𝗗𝗘 𝗕𝗬 𝗫𝗘𝗥𝗢𝗡 @𝘅𝗶𝘅𝘄𝘃"
         )
         if status_msg:
             try:
