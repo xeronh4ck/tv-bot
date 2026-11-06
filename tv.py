@@ -551,36 +551,45 @@ def extract_auth_url_from_tv2(html: str) -> Optional[str]:
 def submit_tv_code(
     netflix_id: str, tv_code: str
 ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[int]]:
-    session = requests.Session()
-    session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
+  """Attempts TV code activation across /tv2, /tv8, and /tv9 endpoints sequentially."""
+  endpoints = ["/tv2", "/tv8", "/tv9"]
+  session = requests.Session()
+  session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
+  proxy = get_random_proxy()
+
+  last_err = "No endpoints succeeded"
+  last_status = None
+
+  for ep in endpoints:
+    base_tv_url = f"https://www.netflix.com{ep}"
     headers = BASE_HEADERS.copy()
-    headers["Referer"] = "https://www.netflix.com/tv2"
+    headers["Referer"] = base_tv_url
     headers["Origin"] = "https://www.netflix.com"
-    proxy = get_random_proxy()
 
     try:
-        r = session.get(
-            "https://www.netflix.com/tv2",
-            headers=headers,
-            proxies=proxy,
-            timeout=REQUEST_TIMEOUT,
-            verify=False,
-        )
-        if r.status_code != 200:
-            return (
-                False,
-                None,
-                None,
-                f"GET /tv2 returned {r.status_code}",
-                r.status_code,
-            )
+      # Step 1: GET request to retrieve dynamic authURL token
+      r = session.get(
+          base_tv_url,
+          headers=headers,
+          proxies=proxy,
+          timeout=REQUEST_TIMEOUT,
+          verify=False,
+      )
+      if r.status_code != 200:
+        last_err = f"GET {ep} returned {r.status_code}"
+        last_status = r.status_code
+        continue
     except Exception as e:
-        return False, None, None, f"GET error: {e}", None
+      last_err = f"GET {ep} error: {e}"
+      continue
 
     auth_url = extract_auth_url_from_tv2(r.text)
     if not auth_url:
-        return False, None, None, "authURL not found", r.status_code
+      last_err = f"authURL not found on {ep}"
+      last_status = r.status_code
+      continue
 
+    # Step 2: POST payload to active endpoint
     payload = {
         "flow": "websiteSignUp",
         "authURL": auth_url,
@@ -595,17 +604,18 @@ def submit_tv_code(
     post_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     try:
-        r = session.post(
-            "https://www.netflix.com/tv2",
-            data=payload,
-            headers=post_headers,
-            proxies=proxy,
-            timeout=REQUEST_TIMEOUT,
-            verify=False,
-            allow_redirects=True,
-        )
+      r = session.post(
+          base_tv_url,
+          data=payload,
+          headers=post_headers,
+          proxies=proxy,
+          timeout=REQUEST_TIMEOUT,
+          verify=False,
+          allow_redirects=True,
+      )
     except Exception as e:
-        return False, None, None, f"POST error: {e}", None
+      last_err = f"POST {ep} error: {e}"
+      continue
 
     final_url = r.url
     status = r.status_code
@@ -615,17 +625,34 @@ def submit_tv_code(
     cleaned = re.sub(r"<[^>]+>", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    if "/tv/out/success" in final_url:
-        return True, final_url, cleaned, None, status
+    # Success conditions
+    if "/tv/out/success" in final_url or "success" in final_url.lower():
+      logger.info(
+          f"TV Activation succeeded using endpoint {ep} for code {tv_code}"
+      )
+      return True, final_url, cleaned, None, status
+
     lower_text = r.text.lower()
     if (
         "your tv is ready to watch" in lower_text
         or "you're ready to watch" in lower_text
     ):
-        return True, final_url, cleaned, None, status
+      logger.info(
+          f"TV Activation succeeded using endpoint {ep} for code {tv_code}"
+      )
+      return True, final_url, cleaned, None, status
+
+    # Track specific failure responses before trying next endpoint
     if "that code wasn't right" in lower_text or "invalid code" in lower_text:
-        return False, final_url, cleaned, "Invalid code", status
-    return False, final_url, cleaned, "Unknown result", status
+      last_err = f"Invalid code response on {ep}"
+      last_status = status
+      continue
+
+    last_err = f"Unknown result on {ep}"
+    last_status = status
+
+  return False, None, None, last_err, last_status
+    
 
 
 def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]:
