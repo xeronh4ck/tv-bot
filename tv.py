@@ -534,124 +534,139 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
 
 
 # ========== TV ACTIVATION USING /tv2 API ==========
-def extract_auth_url_from_tv2(html: str) -> Optional[str]:
-    patterns = [
-        r'name="authURL"\s+value="([^"]+)"',
-        r'authURL["\']?\s*[:=]\s*["\']([^"]+)["\']',
-        r"authURL=([^&\s\"']+)",
-        r'value="(c1\.[^"]+)"',
-    ]
-    for pat in patterns:
-        m = re.search(pat, html)
-        if m:
-            return m.group(1)
-    return None
+def extract_form_fields(html: str) -> dict:
+    """Extracts authURL, flwssn, and any hidden input fields from the Netflix TV form."""
+    fields = {}
+
+    # Extract authURL
+    auth_match = re.search(r'name="authURL"\s+value="([^"]+)"', html)
+    if not auth_match:
+        auth_match = re.search(r'authURL["\']?\s*[:=]\s*["\']([^"]+)["\']', html)
+    if not auth_match:
+        auth_match = re.search(r"authURL=([^&\s\"']+)", html)
+    if not auth_match:
+        auth_match = re.search(r'value="(c1\.[^"]+)"', html)
+    
+    if auth_match:
+        fields["authURL"] = auth_match.group(1)
+
+    # Extract flwssn (Flow Session ID)
+    flwssn_match = re.search(r'name="flwssn"\s+value="([^"]+)"', html)
+    if flwssn_match:
+        fields["flwssn"] = flwssn_match.group(1)
+
+    return fields
 
 
 def submit_tv_code(
     netflix_id: str, tv_code: str
 ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[int]]:
-  """Attempts TV code activation across /tv2, /tv8, and /tv9 endpoints sequentially."""
-  endpoints = ["/tv2", "/tv8", "/tv9"]
-  session = requests.Session()
-  session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
-  proxy = get_random_proxy()
+    """
+    Attempts TV code activation across /tv2, /tv8, and /tv9 endpoints sequentially
+    while extracting authURL and dynamic flwssn session parameters.
+    """
+    endpoints = ["/tv2", "/tv8", "/tv9"]
+    session = requests.Session()
+    session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
+    proxy = get_random_proxy()
 
-  last_err = "No endpoints succeeded"
-  last_status = None
+    last_err = "No endpoints succeeded"
+    last_status = None
 
-  for ep in endpoints:
-    base_tv_url = f"https://www.netflix.com{ep}"
-    headers = BASE_HEADERS.copy()
-    headers["Referer"] = base_tv_url
-    headers["Origin"] = "https://www.netflix.com"
+    for ep in endpoints:
+        base_tv_url = f"https://www.netflix.com{ep}"
+        headers = BASE_HEADERS.copy()
+        headers["Referer"] = base_tv_url
+        headers["Origin"] = "https://www.netflix.com"
 
-    try:
-      # Step 1: GET request to retrieve dynamic authURL token
-      r = session.get(
-          base_tv_url,
-          headers=headers,
-          proxies=proxy,
-          timeout=REQUEST_TIMEOUT,
-          verify=False,
-      )
-      if r.status_code != 200:
-        last_err = f"GET {ep} returned {r.status_code}"
-        last_status = r.status_code
-        continue
-    except Exception as e:
-      last_err = f"GET {ep} error: {e}"
-      continue
+        try:
+            # Step 1: GET request to retrieve dynamic form tokens
+            r = session.get(
+                base_tv_url,
+                headers=headers,
+                proxies=proxy,
+                timeout=REQUEST_TIMEOUT,
+                verify=False,
+            )
+            if r.status_code != 200:
+                last_err = f"GET {ep} returned {r.status_code}"
+                last_status = r.status_code
+                continue
+        except Exception as e:
+            last_err = f"GET {ep} error: {e}"
+            continue
 
-    auth_url = extract_auth_url_from_tv2(r.text)
-    if not auth_url:
-      last_err = f"authURL not found on {ep}"
-      last_status = r.status_code
-      continue
+        fields = extract_form_fields(r.text)
+        auth_url = fields.get("authURL")
 
-    # Step 2: POST payload to active endpoint
-    payload = {
-        "flow": "websiteSignUp",
-        "authURL": auth_url,
-        "flowMode": "enterTvLoginRendezvousCode",
-        "withFields": "tvLoginRendezvousCode,isTvUrl2",
-        "code": tv_code,
-        "tvLoginRendezvousCode": tv_code,
-        "isTvUrl2": "true",
-        "action": "nextAction",
-    }
-    post_headers = headers.copy()
-    post_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if not auth_url:
+            last_err = f"authURL not found on {ep}"
+            last_status = r.status_code
+            continue
 
-    try:
-      r = session.post(
-          base_tv_url,
-          data=payload,
-          headers=post_headers,
-          proxies=proxy,
-          timeout=REQUEST_TIMEOUT,
-          verify=False,
-          allow_redirects=True,
-      )
-    except Exception as e:
-      last_err = f"POST {ep} error: {e}"
-      continue
+        # Step 2: Build POST payload including flwssn if present
+        payload = {
+            "flow": "websiteSignUp",
+            "authURL": auth_url,
+            "flowMode": "enterTvLoginRendezvousCode",
+            "withFields": "tvLoginRendezvousCode,isTvUrl2",
+            "code": tv_code,
+            "tvLoginRendezvousCode": tv_code,
+            "isTvUrl2": "true",
+            "action": "nextAction",
+        }
 
-    final_url = r.url
-    status = r.status_code
+        if "flwssn" in fields:
+            payload["flwssn"] = fields["flwssn"]
 
-    cleaned = re.sub(r"<script[^>]*>.*?</script>", "", r.text, flags=re.DOTALL)
-    cleaned = re.sub(r"<style[^>]*>.*?</style>", "", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        post_headers = headers.copy()
+        post_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-    # Success conditions
-    if "/tv/out/success" in final_url or "success" in final_url.lower():
-      logger.info(
-          f"TV Activation succeeded using endpoint {ep} for code {tv_code}"
-      )
-      return True, final_url, cleaned, None, status
+        try:
+            r = session.post(
+                base_tv_url,
+                data=payload,
+                headers=post_headers,
+                proxies=proxy,
+                timeout=REQUEST_TIMEOUT,
+                verify=False,
+                allow_redirects=True,
+            )
+        except Exception as e:
+            last_err = f"POST {ep} error: {e}"
+            continue
 
-    lower_text = r.text.lower()
-    if (
-        "your tv is ready to watch" in lower_text
-        or "you're ready to watch" in lower_text
-    ):
-      logger.info(
-          f"TV Activation succeeded using endpoint {ep} for code {tv_code}"
-      )
-      return True, final_url, cleaned, None, status
+        final_url = r.url
+        status = r.status_code
 
-    # Track specific failure responses before trying next endpoint
-    if "that code wasn't right" in lower_text or "invalid code" in lower_text:
-      last_err = f"Invalid code response on {ep}"
-      last_status = status
-      continue
+        cleaned = re.sub(r"<script[^>]*>.*?</script>", "", r.text, flags=re.DOTALL)
+        cleaned = re.sub(r"<style[^>]*>.*?</style>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    last_err = f"Unknown result on {ep}"
-    last_status = status
+        # Step 3: Verify success criteria
+        if "/tv/out/success" in final_url or "success" in final_url.lower():
+            logger.info(f"TV Activation succeeded using endpoint {ep} for code {tv_code}")
+            return True, final_url, cleaned, None, status
 
-  return False, None, None, last_err, last_status
+        lower_text = r.text.lower()
+        if (
+            "your tv is ready to watch" in lower_text
+            or "you're ready to watch" in lower_text
+        ):
+            logger.info(f"TV Activation succeeded using endpoint {ep} for code {tv_code}")
+            return True, final_url, cleaned, None, status
+
+        if "that code wasn't right" in lower_text or "invalid code" in lower_text:
+            last_err = f"Invalid code response on {ep}"
+            last_status = status
+            continue
+
+        last_err = f"Unknown result on {ep}"
+        last_status = status
+
+    return False, None, None, last_err, last_status
+        
     
 
 
