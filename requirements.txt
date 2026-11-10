@@ -6,3 +6,4 @@ gunicorn==23.0.0
 rarfile==4.2
 pymongo
 certifi
+requests
